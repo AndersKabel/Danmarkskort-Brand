@@ -5,17 +5,38 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Brand – Danmarkskort</title>
 
-  <!-- Vores stylesheet -->
   <link rel="stylesheet" href="style.css" />
 
-  <!-- Leaflet CSS/JS fra CDN -->
+  <!-- Leaflet -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin defer></script>
 
-  <!-- Vores script -->
   <script src="script.js" defer></script>
 </head>
 <body>
-  <div id="map"></div>
+  <header class="topbar">
+    <div class="brand">🚒 Brand – Danmarkskort</div>
+    <div class="searchbar">
+      <input id="searchInput" type="text" placeholder="Søg adresse (fx Oksenbjergvej 28, 7323 Give)" autocomplete="off" />
+      <div id="results" class="results"></div>
+    </div>
+  </header>
+
+  <main id="map"></main>
+
+  <!-- Popup-skabelon -->
+  <template id="info-template">
+    <div class="info">
+      <div class="addr"><strong>Valgt adresse</strong><br><span data-bind="address"></span></div>
+      <hr />
+      <div class="net">
+        <strong>Netselskab</strong><br>
+        <div class="netline" data-bind="name"></div>
+        <div class="netline" data-bind="phone"></div>
+        <a class="netline" data-bind="website" target="_blank" rel="noopener"></a>
+        <div class="logo-wrap"><img data-bind="logo" alt="Netselskab logo" /></div>
+      </div>
+    </div>
+  </template>
 </body>
 </html>
