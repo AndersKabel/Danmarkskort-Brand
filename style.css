@@ -1,0 +1,3 @@
+/* Sørger for at kortet er synligt og fylder hele siden */
+html, body { height: 100%; margin: 0; }
+#map { height: 100vh; width: 100vw; }
