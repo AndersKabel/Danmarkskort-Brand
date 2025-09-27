@@ -1,9 +1,22 @@
-/* Sørger for at kortet fylder hele vinduet */
-html, body {
-  height: 100%;
-  margin: 0;
-}
-#map {
-  height: 100vh;
-  width: 100vw;
-}
+/* Layout */
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+#map { height: calc(100% - 58px); }
+
+/* Topbar */
+.topbar { display:flex; align-items:center; gap:1rem; padding:0.5rem 1rem; background:#0f172a; color:#fff; }
+.brand { font-weight:700; }
+.searchbar { position: relative; flex: 1; max-width: 720px; }
+#searchInput { width: 100%; padding: 0.65rem 0.8rem; border-radius: 10px; border: 1px solid #334155; outline: none; }
+
+/* Autocomplete */
+.results { position:absolute; top: 110%; left:0; right:0; background:#fff; border:1px solid #cbd5e1; border-radius:10px; overflow:hidden; display:none; z-index:1000; max-height: 60vh; overflow-y:auto; }
+.results .item { padding:0.5rem 0.75rem; cursor:pointer; }
+.results .item:hover { background:#f1f5f9; }
+
+/* Popup */
+.leaflet-popup-content { margin: 0.5rem; }
+.info .addr, .info .net { font-size: 0.95rem; }
+.info .netline { margin-top: 2px; word-break: break-word; }
+.logo-wrap { margin-top: 0.5rem; max-width: 220px; }
+.logo-wrap img { max-width: 100%; height: auto; display:block; }
