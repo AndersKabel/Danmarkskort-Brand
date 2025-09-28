@@ -16,9 +16,20 @@
 <body>
   <header class="topbar">
     <div class="brand">🚒 Brand – Danmarkskort</div>
+
     <div class="searchbar">
-      <input id="searchInput" type="text" placeholder="Søg adresse (fx Oksenbjergvej 28, 7323 Give)" autocomplete="off" />
-      <div id="results" class="results"></div>
+      <input
+        id="searchInput"
+        type="text"
+        placeholder="Søg adresse (fx Oksenbjergvej 28, 7323 Give)"
+        autocomplete="off"
+        aria-autocomplete="list"
+        aria-controls="results"
+        aria-expanded="false"
+        aria-activedescendant=""
+      />
+      <button id="clearBtn" title="Ryd søgning" aria-label="Ryd søgning">×</button>
+      <div id="results" class="results" role="listbox"></div>
     </div>
   </header>
 
