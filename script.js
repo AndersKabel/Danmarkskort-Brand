@@ -1,9 +1,10 @@
 /* ===========================================
-   Brand – Danmarkskort (etape 1)
+   Brand – Danmarkskort (trin 1)
    - Basiskort
    - DAWA adressesøgning + valg
-   - Popup med adresse
-   - Klar til netselskab-opslag via proxy
+   - Tastatur-navigation i resultater (↑/↓/Enter/Esc)
+   - Clear-knap (x) der rydder søgning og lukker alt
+   - Klar til netselskab-opslag via proxy (slået fra)
    =========================================== */
 
 // Sæt denne til din Cloudflare Worker, når du er klar med proxyen.
@@ -23,8 +24,11 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 const searchInput = document.getElementById("searchInput");
 const resultsBox  = document.getElementById("results");
 const infoTpl     = document.getElementById("info-template");
+const clearBtn    = document.getElementById("clearBtn");
 
 let marker = null;
+let activeIndex = -1;   // til tastatur-navigation
+let lastResults  = [];  // sidst viste resultater
 
 /* ---------- Hjælpere ---------- */
 function debounce(fn, ms) {
@@ -38,17 +42,43 @@ function escapeHtml(s) {
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
 }
+function setActive(index) {
+  const nodes = [...resultsBox.querySelectorAll(".item")];
+  nodes.forEach(n => n.classList.remove("active"));
+  if (index >= 0 && index < nodes.length) {
+    nodes[index].classList.add("active");
+    const id = nodes[index].id || "";
+    searchInput.setAttribute("aria-activedescendant", id);
+    // scroll item i view hvis nødvendigt
+    const el = nodes[index];
+    const box = resultsBox;
+    const top = el.offsetTop;
+    const bottom = top + el.offsetHeight;
+    if (top < box.scrollTop) box.scrollTop = top;
+    else if (bottom > box.scrollTop + box.clientHeight) box.scrollTop = bottom - box.clientHeight;
+  } else {
+    searchInput.setAttribute("aria-activedescendant", "");
+  }
+  activeIndex = index;
+}
+function hideResults() {
+  resultsBox.style.display = "none";
+  resultsBox.innerHTML = "";
+  searchInput.setAttribute("aria-expanded", "false");
+  activeIndex = -1;
+  lastResults = [];
+}
+function showClear(show) {
+  clearBtn.style.display = show ? "inline-block" : "none";
+}
 
 /* ---------- DAWA søgning ---------- */
-// Autocomplete (officiel Dataforsyningen)
 async function dawaAutocomplete(q) {
   const url = `https://api.dataforsyningen.dk/adresser/autocomplete?q=${encodeURIComponent(q)}&fuzzy=`;
   const r = await fetch(url, { headers: { "Accept": "application/json" } });
   if (!r.ok) throw new Error("Adresse-autocomplete fejlede");
   return r.json();
 }
-
-// Slå adresse op fra id (for koordinater mm.)
 async function dawaGetById(id) {
   const url = `https://api.dataforsyningen.dk/adresser/${id}`;
   const r = await fetch(url, { headers: { "Accept": "application/json" } });
@@ -74,32 +104,31 @@ async function elnetSupplierByExternalId(externalId) {
 
 /* ---------- UI: vis forslag ---------- */
 function showResults(items) {
+  lastResults = items || [];
   if (!items || !items.length) {
-    resultsBox.style.display = "none";
-    resultsBox.innerHTML = "";
+    hideResults();
     return;
   }
-  resultsBox.innerHTML = items.slice(0, 12).map(x => (
-    `<div class="item" data-id="${x.adresse.id}" data-tekst="${escapeHtml(x.tekst)}">${escapeHtml(x.tekst)}</div>`
-  )).join("");
+  resultsBox.innerHTML = items.slice(0, 50).map((x, i) => {
+    const id = `res-${i}`;
+    return `<div class="item" id="${id}" role="option" aria-selected="false" data-id="${x.adresse.id}" data-tekst="${escapeHtml(x.tekst)}">${escapeHtml(x.tekst)}</div>`;
+  }).join("");
   resultsBox.style.display = "block";
+  searchInput.setAttribute("aria-expanded", "true");
+  setActive(-1);
 }
 
 /* ---------- Hovedflow: vælg adresse ---------- */
 async function onPickAddress(adresseId, visningstekst) {
   try {
-    // 1) Hent adresse + koordinater
     const adr = await dawaGetById(adresseId);
-    // Dataforsyningen bruger [x,y] = [lon, lat] (WGS84)
     const [lon, lat] = adr.adgangsadresse.adgangspunkt.koordinater;
     const position = [lat, lon];
 
-    // 2) Marker + zoom
     if (!marker) marker = L.marker(position).addTo(map);
     marker.setLatLng(position);
     map.setView(position, 16);
 
-    // 3) (Valgfrit) elnet-opslag via proxy
     let supplier = null;
     if (PROXY_BASE) {
       const auto = await elnetAutocomplete(visningstekst);
@@ -110,7 +139,6 @@ async function onPickAddress(adresseId, visningstekst) {
       }
     }
 
-    // 4) Byg popup
     const node = infoTpl.content.cloneNode(true);
     node.querySelector('[data-bind="address"]').textContent = visningstekst;
 
@@ -137,32 +165,69 @@ async function onPickAddress(adresseId, visningstekst) {
 }
 
 /* ---------- Events ---------- */
+// Input → fetch forslag (debounced)
 searchInput.addEventListener("input", debounce(async (e) => {
   const q = e.target.value.trim();
-  if (q.length < 3) { showResults([]); return; }
+  showClear(q.length > 0);
+  if (q.length < 3) { hideResults(); return; }
   try {
     const res = await dawaAutocomplete(q);
     showResults(res);
   } catch (err) {
     console.error(err);
-    showResults([]);
+    hideResults();
   }
-}, 250));
+}, 200));
 
+// Klik på forslag
 resultsBox.addEventListener("click", (e) => {
   const item = e.target.closest(".item");
   if (!item) return;
   const id = item.getAttribute("data-id");
   const tekst = item.getAttribute("data-tekst");
-  resultsBox.style.display = "none";
-  resultsBox.innerHTML = "";
+  hideResults();
   searchInput.value = tekst;
+  showClear(true);
   onPickAddress(id, tekst);
+});
+
+// Tastatur i inputfeltet
+searchInput.addEventListener("keydown", (e) => {
+  const items = [...resultsBox.querySelectorAll(".item")];
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    if (!items.length) return;
+    setActive(activeIndex < items.length - 1 ? activeIndex + 1 : 0);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    if (!items.length) return;
+    setActive(activeIndex > 0 ? activeIndex - 1 : items.length - 1);
+  } else if (e.key === "Enter") {
+    if (activeIndex >= 0 && activeIndex < items.length) {
+      e.preventDefault();
+      items[activeIndex].click();
+    }
+  } else if (e.key === "Escape") {
+    hideResults();
+  }
 });
 
 // Luk forslag når man klikker udenfor
 document.addEventListener("click", (e) => {
   if (!resultsBox.contains(e.target) && e.target !== searchInput) {
-    resultsBox.style.display = "none";
+    hideResults();
   }
+});
+
+// Clear-knap
+clearBtn.addEventListener("click", () => {
+  searchInput.value = "";
+  showClear(false);
+  hideResults();
+  if (marker) {
+    map.removeLayer(marker);
+    marker = null;
+  }
+  // luk evt. popup
+  map.closePopup();
 });
