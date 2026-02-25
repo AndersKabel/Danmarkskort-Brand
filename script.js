@@ -618,7 +618,7 @@ async function planRouteORS() {
     const poly = L.polyline(latLngs, {
       color: "blue",
       weight: 5,
-      opacity: 1.7
+      opacity: 1.0
     }).addTo(routeLayer);
 
     if (!map.hasLayer(routeLayer)) {
@@ -888,6 +888,18 @@ var chargeMapLayer = L.layerGroup();
 // NYT: lag til at samle ekstra markører, når "Behold markører" er slået til
 var keepMarkersLayer   = L.layerGroup();
 var bbrBuildingsLayer = L.layerGroup();
+// Nyt lag til BBR-bygninger/ejendomsarealer (polygoner)
+var bbrFootprintsLayer = L.geoJSON(null, {
+  style: {
+    color: "#008000",
+    weight: 2,
+    opacity: 0.7
+  }
+});
+
+// Seneste DK-adressevalg (bruges til at kunne sende DOBBELT DAR_BFE-kald hver gang)
+var lastSelectedHusnummerIdForBBR = null; // adgangsadresse-id (husnummerId)
+var lastSelectedAdresseIdForBBR = null;   // enhedsadresse-id (adresseId)
 var keepMarkersEnabled = false;
 
 // Global reference til "seneste" markør (bruges bl.a. til radius)
@@ -904,7 +916,8 @@ const overlayMaps = {
   "Kommunegrænser": kommunegrænserLayer,
   "Rutenummereret vejnet": rutenummerLayer,
   // NYT: overlay til at beholde markører
-  "Behold markører": keepMarkersLayer
+  "Behold markører": keepMarkersLayer,
+    "BBR-matrikel": bbrFootprintsLayer
 };
 
 // Tilføj vejrlag, hvis API-nøgle er sat
@@ -1488,6 +1501,7 @@ async function fetchBBRData(bbrId, bfeNumber) {
       }
     }
 
+    /*
     // Hvis ingen bygninger er fundet, prøv Datafordeler via bbr-proxy:
     // Først via husnummerTilBygningBfe, derefter adresseTilEnhedBfe
     if (bbrId) {
@@ -1559,25 +1573,117 @@ async function fetchBBRData(bbrId, bfeNumber) {
         console.warn("Fejl ved adresseTilEnhedBfe-fallback:", err);
       }
     }
+*/
+        // Ingen bygninger fundet via direkte /bygning-opslag.
+    // NYT: DOBBELT DAR_BFE-kald (begge sendes hver gang), og brug det der giver data.
+    try {
+      const husId = (bbrId != null && String(bbrId).trim() !== "")
+        ? String(bbrId).trim()
+        : (lastSelectedHusnummerIdForBBR != null ? String(lastSelectedHusnummerIdForBBR).trim() : null);
 
-    // Ingen bygninger fundet
+      const adrId = (lastSelectedAdresseIdForBBR != null && String(lastSelectedAdresseIdForBBR).trim() !== "")
+        ? String(lastSelectedAdresseIdForBBR).trim()
+        : null;
+
+      const bfeList = await fetchBfeNumbersViaDarBfeDual(husId, adrId);
+
+      // Hvis vi fik BFE-numre, så prøv at hente bygninger via BFE
+      if (Array.isArray(bfeList) && bfeList.length > 0) {
+        for (let i = 0; i < bfeList.length; i++) {
+          const bfe = bfeList[i];
+          try {
+            const resp = await fetch(`${BBR_PROXY}/bygning?bfenummer=${encodeURIComponent(bfe)}`, { method: "GET" });
+            if (!resp.ok) continue;
+            const buildings = await resp.json();
+            if (Array.isArray(buildings) && buildings.length > 0) {
+              return buildings;
+            }
+          } catch (e) {
+            // Ignorér og prøv næste BFE
+          }
+        }
+      }
+    } catch (e) {
+      // Ignorér – vi falder tilbage til []
+    }
+
     return [];
   } catch (e) {
     console.error("BBR fetch error via proxy:", e);
     return [];
   }
 }
-async function fetchBBRTekniskeAnlaeg(adresseId, bfeNumber) {
+// DOBBELT DAR_BFE-kald:
+// - husnummerTilBygningBfe (for almindeligt hus / adgangsadresse)
+// - adresseTilEnhedBfe (for etageejendom / enhedsadresse)
+// Begge kald sendes hver gang. Det kald der giver data bruges; det andet ignoreres.
+async function fetchBfeNumbersViaDarBfeDual(husnummerId, adresseId) {
+  const husId = (husnummerId != null && String(husnummerId).trim() !== "")
+    ? String(husnummerId).trim()
+    : null;
+
+  const adrId = (adresseId != null && String(adresseId).trim() !== "")
+    ? String(adresseId).trim()
+    : null;
+
+  // Vi returnerer en liste af BFE-numre (strings), unikke.
+  const out = new Set();
+
+  // Byg begge URL'er (hvis id mangler, kalder vi stadig endpointet med tom id => det vil fejle,
+  // men kravet er at "begge kald skal sendes hver gang". Vi håndterer fejl og ignorerer det.
+  const urlHus = `${BBR_PROXY}/husnummerTilBygningBfe?husnummerId=${encodeURIComponent(husId || "")}`;
+  const urlAdr = `${BBR_PROXY}/adresseTilEnhedBfe?adresseId=${encodeURIComponent(adrId || "")}`;
+
+  // Send begge kald hver gang (parallel)
+  const [r1, r2] = await Promise.allSettled([
+    fetch(urlHus, { method: "GET" }),
+    fetch(urlAdr, { method: "GET" })
+  ]);
+
+  async function collectFromResponse(settledResp) {
+    if (!settledResp || settledResp.status !== "fulfilled") return;
+    const resp = settledResp.value;
+    if (!resp || !resp.ok) return;
+
+    let data;
+    try {
+      data = await resp.json();
+    } catch (e) {
+      return;
+    }
+
+    // DAR_BFE payload kan variere: vi leder efter felter der matcher /bfe.*nummer/i
+    const pushBfeFromObj = (obj) => {
+      const v = findFirstMatchingField(obj, /bfe.*nummer/i);
+      if (v != null && String(v).trim() !== "") {
+        out.add(String(v).trim());
+      }
+    };
+
+    if (Array.isArray(data)) {
+      data.forEach(pushBfeFromObj);
+    } else if (data && typeof data === "object") {
+      pushBfeFromObj(data);
+    }
+  }
+
+  await collectFromResponse(r1);
+  await collectFromResponse(r2);
+
+  return Array.from(out);
+}
+
+async function fetchBBRTekniskeAnlaeg(husnummerId, bfeNumber) {
   try {
-    if (!adresseId && !bfeNumber) {
+    if (!husnummerId && !bfeNumber) {
       return [];
     }
 
     const urls = [];
 
     // 1) Korrekt parameter til worker: adgangsadresseid
-    if (adresseId) {
-      urls.push(`${BBR_PROXY}/tekniskeAnlaeg?adgangsadresseid=${encodeURIComponent(adresseId)}`);
+       if (husnummerId) {
+      urls.push(`${BBR_PROXY}/tekniskeAnlaeg?adgangsadresseid=${encodeURIComponent(husnummerId)}`);
     }
 
     // 2) Fallback: BFE (hvis tekniske anlæg ikke kan hentes direkte på adgangsadresse)
@@ -1612,6 +1718,27 @@ async function fetchBBRTekniskeAnlaeg(adresseId, bfeNumber) {
     console.warn("Fejl ved hentning af tekniske anlæg:", err);
     return [];
   }
+}
+
+function dedupeById(arr) {
+  const seen = new Set();
+  return (arr || []).filter(item => {
+    // Find en unik nøgle (id_lokalId eller id) på bygningen
+    let id = null;
+    if (item && item.bygning) {
+      id = item.bygning.id_lokalId || item.bygning.id;
+    }
+    if (!id) {
+      // Hvis ingen id, behold elementet
+      return true;
+    }
+    if (seen.has(id)) {
+      // Dublet fundet → fjern
+      return false;
+    }
+    seen.add(id);
+    return true;
+  });
 }
 
 // Hjælpefunktion: find første felt i et objekt (og evt. underobjekter), hvor nøglen matcher et regex.
@@ -1670,6 +1797,140 @@ function collectBfeNumbersFromBuildings(buildings, fallbackBfeNumber) {
   }
 
   return Array.from(result);
+}
+
+// NY: saml grund-id'er fra bygninger (så vi kan slå BFE op via /grund)
+function collectGrundIdsFromBuildings(buildings) {
+  const result = new Set();
+  if (!Array.isArray(buildings)) return [];
+
+  buildings.forEach(b => {
+    const building = (b && b.bygning) ? b.bygning : b;
+    if (!building || typeof building !== "object") return;
+
+    // BBRPublic har typisk "grund": "<uuid>"
+    const grundId = building.grund || building["grund"] || null;
+    if (grundId != null && String(grundId).trim() !== "") {
+      result.add(String(grundId).trim());
+    }
+  });
+
+  return Array.from(result);
+}
+
+// NY: slå grund op og udled BFE-numre fra grund-svar
+async function fetchBfeNumbersViaGrundIds(grundIds) {
+  const out = new Set();
+  const ids = Array.isArray(grundIds) ? grundIds : [grundIds];
+
+  for (const gid of ids) {
+    const grundId = gid != null ? String(gid).trim() : "";
+    if (!grundId) continue;
+
+    // 1) prøv mest sandsynlige parameternavne
+    const tries = [
+      { id: grundId },
+      { id_lokalId: grundId },
+      { idLokalId: grundId },
+      { grund: grundId }
+    ];
+
+    for (const params of tries) {
+      const data = await fetchBBRGrund(params);
+
+      const list = Array.isArray(data) ? data : (data ? [data] : []);
+      for (const g of list) {
+        // findFirstMatchingField leder rekursivt efter fx "bestemtFastEjendomBFENr" / "bfeNummer" osv.
+        const bfeVal =
+          g?.bestemtFastEjendomBFENr ||
+          findFirstMatchingField(g, /bestemt.*bfe.*nr/i) ||
+          findFirstMatchingField(g, /bfe.*nummer/i) ||
+          findFirstMatchingField(g, /bfenr/i);
+
+        if (bfeVal != null && String(bfeVal).trim() !== "") {
+          out.add(String(bfeVal).trim());
+        }
+      }
+
+      // hvis vi allerede fandt BFE på denne grund, behøver vi ikke prøve flere param-variationer
+      if (out.size > 0) break;
+    }
+  }
+
+  return Array.from(out);
+}
+
+// Hjælpefunktion: saml BFE-numre fra enheder
+function collectBfeNumbersFromEnheder(enhedList) {
+  const result = new Set();
+  if (!Array.isArray(enhedList)) return [];
+
+  enhedList.forEach(e => {
+    if (!e || typeof e !== "object") return;
+    const bfeVal = findFirstMatchingField(e, /bfe.*nummer/i);
+    if (bfeVal != null && String(bfeVal).trim() !== "") {
+      result.add(String(bfeVal).trim());
+    }
+  });
+
+  return Array.from(result);
+}
+
+function collectBfeCandidatesFromAnyValue(value, outSet) {
+  if (value == null) return;
+
+  if (typeof value === "number") {
+    if (Number.isFinite(value)) {
+      const s = String(Math.trunc(value));
+      if (s.length >= 5) outSet.add(s);
+    }
+    return;
+  }
+
+  if (typeof value === "string") {
+    const matches = value.match(/\b\d{5,12}\b/g);
+    if (matches) {
+      matches.forEach(m => outSet.add(m));
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach(v => collectBfeCandidatesFromAnyValue(v, outSet));
+    return;
+  }
+
+  if (typeof value === "object") {
+    Object.keys(value).forEach(k => {
+      const v = value[k];
+      if (/(bfe|bestemt.*fast.*ejendom|samlet.*fast.*ejendom|moderejendom|moder.*ejendom)/i.test(k)) {
+        collectBfeCandidatesFromAnyValue(v, outSet);
+      }
+      if (v && typeof v === "object") {
+        collectBfeCandidatesFromAnyValue(v, outSet);
+      }
+    });
+  }
+}
+
+function collectRelatedBfeNumbersFromEjendomsrelation(ejendomsrelationList, excludeBfes = []) {
+  const out = new Set();
+  const exclude = new Set((Array.isArray(excludeBfes) ? excludeBfes : [excludeBfes]).map(v => String(v).trim()));
+  const list = Array.isArray(ejendomsrelationList) ? ejendomsrelationList : [];
+
+  list.forEach(rel => {
+    collectBfeCandidatesFromAnyValue(rel, out);
+  });
+
+  const cleaned = [];
+  out.forEach(v => {
+    const s = String(v).trim();
+    if (!s) return;
+    if (exclude.has(s)) return;
+    cleaned.push(s);
+  });
+
+  return cleaned;
 }
 
 // Hjælpefunktion: hent Ejendomsbeliggenhed-data for et eller flere BFE-numre via proxien.
@@ -1805,6 +2066,7 @@ const BBR_BYGNINGSANVENDELSE = {
   217: "Maskinhus, garage mv.",
   218: "Lade til halm, hø mv.",
   219: "Anden bygning til landbrug mv.",
+  220: "Bygning til industri (ældre kode)",
   221: "Bygning til industri med integreret produktionsapparat",
   222: "Bygning til industri uden integreret produktionsapparat",
   223: "Værksted",
@@ -1951,6 +2213,25 @@ function pickFirst(obj, regexList) {
   return null;
 }
 
+function collectMatchingFields(obj, regex, out = []) {
+  if (!obj || typeof obj !== "object") return out;
+
+  for (const key in obj) {
+    if (!Object.prototype.hasOwnProperty.call(obj, key)) continue;
+    const value = obj[key];
+
+    if (regex.test(key)) {
+      out.push(value);
+    }
+
+    if (value && typeof value === "object") {
+      collectMatchingFields(value, regex, out);
+    }
+  }
+
+  return out;
+}
+
 function renderKeyValueList(pairs) {
   let html = "<ul style=\"margin:6px 0 10px 18px; padding:0;\">";
   pairs.forEach(p => {
@@ -1962,6 +2243,153 @@ function renderKeyValueList(pairs) {
   });
   html += "</ul>";
   return html;
+}
+
+function formatBooleanDa(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "boolean") return value ? "Ja" : "Nej";
+  const s = String(value).trim().toLowerCase();
+  if (!s) return null;
+  if (["1", "true", "ja", "yes", "y", "sand", "sandt"].includes(s)) return "Ja";
+  if (["0", "false", "nej", "no", "n", "falsk"].includes(s)) return "Nej";
+  return null;
+}
+
+
+function formatDateDa(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  if (!s) return null;
+
+  // ISO dato/tid
+  const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    return `${isoMatch[3]}.${isoMatch[2]}.${isoMatch[1]}`;
+  }
+
+  // Allerede på format dd.mm.yyyy
+  if (/^\d{2}\.\d{2}\.\d{4}$/.test(s)) return s;
+  return s;
+}
+
+function asCodeString(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  return s || null;
+}
+
+const BBR_TEKNISK_KLASSIFIKATION = {
+  "54.15.05.05": "Tank",
+  "TANK": "Tank"
+};
+
+const BBR_TEKNISK_STATUS = {
+  "6": "Afblændet"
+};
+
+const BBR_TEKNISK_STOERRELSESKLASSE = {
+  "10": "Under 6.000 l"
+};
+
+const BBR_TEKNISK_INDHOLD = {
+  "1001": "Mineralske olieprodukter"
+};
+
+function describeCodeWithFallback(dict, value) {
+  const code = asCodeString(value);
+  if (!code) return null;
+  return dict[code] ? `${dict[code]} (${code})` : `Kode ${code}`;
+}
+
+function resolveOverlappingMarkerLatLon(lat, lon, keyPrefix, usedCoordsMap) {
+  if (typeof lat !== "number" || typeof lon !== "number") return [lat, lon];
+  const mapRef = usedCoordsMap || new Map();
+  const key = `${keyPrefix}:${lat.toFixed(7)},${lon.toFixed(7)}`;
+  const overlapCount = mapRef.get(key) || 0;
+  mapRef.set(key, overlapCount + 1);
+
+  if (overlapCount === 0) {
+    return [lat, lon];
+  }
+
+  // Små offsets (meter) så markører med samme koordinat bliver synlige hver for sig.
+  const angle = (overlapCount * Math.PI) / 3;
+  const meters = 3 + overlapCount * 2;
+  const dLat = (meters / 111320) * Math.sin(angle);
+  const dLon = (meters / (111320 * Math.max(Math.cos((lat * Math.PI) / 180), 0.1))) * Math.cos(angle);
+  return [lat + dLat, lon + dLon];
+}
+
+function summarizeTekniskAnlaeg(t) {
+  const klassifikationKode = pickFirst(t, [/forretningsomr[åaa]de/i, /klassifikation.*kode/i, /anlaegstype.*kode/i]);
+  const klassifikationTekst = pickFirst(t, [/klassifikation.*tekst/i, /teknisk.*anl[æae]g.*type.*tekst/i, /anlaegstype.*tekst/i]);
+  const klassifikationVis = klassifikationTekst || describeCodeWithFallback(BBR_TEKNISK_KLASSIFIKATION, klassifikationKode);
+
+  const anvTekst = pickFirst(t, [/anvendelse.*tekst/i, /anvendelse/i]);
+  const statusRaw = pickFirst(t, [/status/i, /driftstatus/i, /aktiv/i]);
+  const statusVis = describeCodeWithFallback(BBR_TEKNISK_STATUS, statusRaw) || formatMaybe(statusRaw);
+
+  const etableretRaw = pickFirst(t, [/etablerings[åa]r/i, /etabler/i, /installationsdato/i, /oprettet/i]);
+  const etableretVis = formatDateDa(etableretRaw);
+
+  const afmeldtRaw = pickFirst(t, [/afmeld/i, /nedlagt/i, /sl[øo]jfet/i]);
+  const afmeldtVis = formatDateDa(afmeldtRaw) || formatMaybe(afmeldtRaw);
+
+  const nedgravet = pickFirst(t, [/nedgrav/i]);
+  const afblaendet = pickFirst(t, [/afbl[æae]nd/i]);
+
+  const volumenRaw = pickFirst(t, [/volumen/i, /liter/i, /kapacitet/i]);
+  const stoerrelseRaw = pickFirst(t, [/st[øo]rrelsesklasse/i, /stoerrelsesklasse/i, /klasse/i]);
+  const stoerrelseVis = describeCodeWithFallback(BBR_TEKNISK_STOERRELSESKLASSE, stoerrelseRaw) || formatMaybe(stoerrelseRaw);
+
+  const indholdRaw = pickFirst(t, [/indhold/i, /produkt/i, /medium/i]);
+  const indholdVis = describeCodeWithFallback(BBR_TEKNISK_INDHOLD, indholdRaw) || formatMaybe(indholdRaw);
+
+  const placeringSoeRaw = pickFirst(t, [/s[øo]territorie/i, /soterritorie/i]);
+  const placeringSoeBool = formatBooleanDa(placeringSoeRaw);
+  const placeringSoeVis = placeringSoeBool === "Ja"
+    ? "På søterritorie"
+    : (placeringSoeBool === "Nej" ? "Ikke på søterritorie" : formatMaybe(placeringSoeRaw));
+
+  const materiale = pickFirst(t, [/materiale/i]);
+  const revisionRaw = pickFirst(t, [/revisionsdato/i]);
+  const revisionVis = formatDateDa(revisionRaw);
+  const opdateret = formatDateDa(pickFirst(t, [/opdateringstid/i]));
+
+  const headerParts = [];
+  if (klassifikationVis) headerParts.push(klassifikationVis);
+  if (anvTekst && (!klassifikationVis || anvTekst !== klassifikationVis)) headerParts.push(anvTekst);
+
+ const pairs = [
+    { label: "Klassifikation", value: klassifikationVis },
+    { label: "Anvendelse", value: anvTekst },
+    { label: "Status", value: statusVis },
+    { label: "Etableringsår", value: etableretVis },
+    { label: "Størrelsesklasse", value: stoerrelseVis },
+    { label: "Volumen", value: formatMaybe(volumenRaw) },
+    { label: "Indhold", value: indholdVis },
+    { label: "Placering på søterritorie", value: placeringSoeVis },
+    { label: "Nedgravet", value: formatBooleanDa(nedgravet) || formatMaybe(nedgravet) },
+    { label: "Afblændet", value: formatBooleanDa(afblaendet) || formatMaybe(afblaendet) },
+    { label: "Materiale", value: formatMaybe(materiale) },
+    { label: "Revisionsdato", value: revisionVis },
+    { label: "Afmeldt/Nedlagt", value: afmeldtVis },
+    { label: "Data opdateret", value: opdateret }
+  ];
+
+  return {
+    title: headerParts.length > 0 ? headerParts.join(" – ") : "Teknisk anlæg",
+    pairs
+  };
+}
+
+function renderTekniskAnlaegPopupHtml(t, index) {
+  const summary = summarizeTekniskAnlaeg(t);
+  return `
+    <strong>Teknisk anlæg ${index + 1}</strong><br>
+    <span>${escapeHtml(summary.title)}</span>
+    ${renderKeyValueList(summary.pairs)}
+  `;
 }
 
 function summarizeGrund(g) {
@@ -2015,6 +2443,101 @@ function summarizeEjendomsrelation(er) {
   ];
 }
 
+// --- Hjælper: parse "POINT(x y)" fra BBR-felter (typisk UTM/EPSG:25832) ---
+function parseWKTPoint(wkt) {
+  if (!wkt || typeof wkt !== "string") return null;
+  const m = wkt.match(/POINT\s*(?:Z\s*)?\(\s*([0-9.+-]+)\s+([0-9.+-]+)(?:\s+[0-9.+-]+)?\s*\)/i);
+  if (!m) return null;
+  const x = parseFloat(m[1]);
+  const y = parseFloat(m[2]);
+  if (isNaN(x) || isNaN(y)) return null;
+  return [x, y]; // EPSG:25832 (øst, nord)
+}
+
+function parseWKTGeometryLatLon(wkt) {
+  if (!wkt || typeof wkt !== "string") return null;
+
+  const point = parseWKTPoint(wkt);
+  if (point) {
+    const ll = convertToWGS84(point[0], point[1]);
+    return ll ? [ll[0], ll[1]] : null;
+  }
+
+  if (typeof wellknown === "undefined" || !wellknown.parse) return null;
+  if (typeof turf === "undefined" || !turf.centerOfMass) return null;
+
+  try {
+    const geom = wellknown.parse(wkt);
+    if (!geom) return null;
+
+    const feature = turf.feature(geom);
+    const center = turf.centerOfMass(feature);
+    if (!center || !center.geometry || !Array.isArray(center.geometry.coordinates)) return null;
+
+    const c = center.geometry.coordinates;
+    if (c.length < 2) return null;
+
+    const x = Number(c[0]);
+    const y = Number(c[1]);
+    if (Number.isNaN(x) || Number.isNaN(y)) return null;
+
+    if (Math.abs(x) <= 180 && Math.abs(y) <= 90) {
+      return [y, x];
+    }
+
+    const ll = convertToWGS84(x, y);
+    return ll ? [ll[0], ll[1]] : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Henter ejendomsgrænser (jordstykker) som GeoJSON fra Dataforsyningen ved featureId
+async function fetchJordstykkeGeoJSON(featureId) {
+  const url = `https://api.dataforsyningen.dk/jordstykker?featureid=${featureId}`;
+  const resp = await fetch(url);
+  if (!resp.ok) return [];
+  try {
+    const data = await resp.json();
+    // Returner GeoJSON-funktionen direkte (ejendomsgrænser som GeoJSON)
+    return data;
+  } catch (e) {
+    console.warn("Fejl ved parsning af jordstykke-JSON:", e);
+    return [];
+  }
+}
+
+// --- Hjælper: find koordinater i et teknisk anlæg-objekt (robust via regex) ---
+function getTekniskAnlaegLatLon(t, fallbackLat, fallbackLon) {
+  if (!t || typeof t !== "object") return null;
+
+ // 1) Prøv at finde geometri-felter (WKT POINT/POLYGON/MULTIPOLYGON)
+  const coordinateCandidates = collectMatchingFields(t, /koordinat|geometri|wkt|punkt|point/i);
+  for (let i = 0; i < coordinateCandidates.length; i++) {
+    const candidate = coordinateCandidates[i];
+    if (typeof candidate !== "string") continue;
+    const ll = parseWKTGeometryLatLon(candidate);
+    if (ll) return ll;
+  }
+
+  // 2) Prøv GeoJSON-lignende felter (hvis nogle datasæt giver det)
+  if (t.geometri && Array.isArray(t.geometri.koordinater) && t.geometri.koordinater.length >= 2) {
+    const lon = t.geometri.koordinater[0];
+    const lat = t.geometri.koordinater[1];
+    if (Math.abs(lat) <= 90 && Math.abs(lon) <= 180) return [lat, lon];
+    // ellers antag EPSG:25832
+    const ll = convertToWGS84(lon, lat);
+    return ll ? [ll[0], ll[1]] : null;
+  }
+
+  // 3) Fallback til klikpunkt/adressepunkt
+  if (typeof fallbackLat === "number" && typeof fallbackLon === "number") {
+    return [fallbackLat, fallbackLon];
+  }
+
+  return null;
+}
+
 function describeBBRCode(dict, code) {
   if (code === null || code === undefined || code === "") return null;
   const key = String(code);
@@ -2042,6 +2565,12 @@ function hideBBRInfo() {
     }
   }
 }
+    if (bbrFootprintsLayer) {
+      bbrFootprintsLayer.clearLayers();
+      if (map.hasLayer(bbrFootprintsLayer)) {
+        map.removeLayer(bbrFootprintsLayer);
+      }
+    }
 
 /**
  * Render BBR-info i infoboksen. Viser et antal bygninger og detaljer i <details>-elementer.
@@ -2057,6 +2586,13 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
   }
   const bbrBox = document.getElementById("bbrInfoBox");
   if (!bbrBox) return;
+    // Gem seneste kendte id'er til dobbelt DAR_BFE-kald (bruges i fetchBBRData)
+  if (bbrId != null && String(bbrId).trim() !== "") {
+    lastSelectedHusnummerIdForBBR = String(bbrId).trim();
+  }
+  if (adresseId != null && String(adresseId).trim() !== "") {
+    lastSelectedAdresseIdForBBR = String(adresseId).trim();
+  }
 
   // Ryd eksisterende BBR-bygning-markører
   if (bbrBuildingsLayer) {
@@ -2066,24 +2602,44 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
     }
   }
 
+    if (bbrFootprintsLayer) {
+    bbrFootprintsLayer.clearLayers();
+    if (map.hasLayer(bbrFootprintsLayer)) {
+      map.removeLayer(bbrFootprintsLayer);
+    }
+  }
+  
   // Vis loading og gør boksen synlig
   bbrBox.innerHTML = "Henter BBR-data...";
   bbrBox.classList.remove("hidden");
   bbrBox.style.display = "block";
 
   fetchBBRData(bbrId, bfeNumber)
-    .then(async data => {
-      // ----- TEKNISKE ANLÆG -----
-      // VIGTIGT: tekniske anlæg hentes på BFE-nummer.
-      const bfeListForTekniske = collectBfeNumbersFromBuildings(data, bfeNumber);
+  .then(async data => {
 
+    // NYT: udled BFE via grund-id'er, hvis bygningerne har "grund"
+    const grundIds = collectGrundIdsFromBuildings(Array.isArray(data) ? data : []);
+    const bfeFromGrund = await fetchBfeNumbersViaGrundIds(grundIds);
+
+    // Saml alle BFE-kilder vi har:
+    const bfeCombined = Array.from(new Set([
+      ...(collectBfeNumbersFromBuildings(data, bfeNumber) || []),
+      ...(bfeFromGrund || [])
+    ]));
+
+    // ----- TEKNISKE ANLÆG -----
+    // Brug bfeCombined i stedet for kun collectBfeNumbersFromBuildings(...)
+    const bfeListForTekniske = bfeCombined;
+      console.log("bfeNumber (fallback):", bfeNumber);
+      console.log("bfeListForTekniske:", bfeListForTekniske);
+      
       let tekniske = [];
       for (let i = 0; i < bfeListForTekniske.length; i++) {
         const bfe = bfeListForTekniske[i];
         // Brug både adresseId (adgangsadresseid) og BFE som parametre.
         // fetchBBRTekniskeAnlaeg håndterer selv at prøve adgangsadresseid først
         // og derefter bfenummer.
-        const tmp = await fetchBBRTekniskeAnlaeg(adresseId, bfe);
+        const tmp = await fetchBBRTekniskeAnlaeg(bbrId, bfe);
         if (Array.isArray(tmp) && tmp.length > 0) {
           tekniske = tekniske.concat(tmp);
         }
@@ -2092,7 +2648,7 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
       // ----- GRUND / ENHED / EJENDOMSRELATION -----
       // Disse kald bruger de nye helper-funktioner fra trin 2.
       // Vi forsøger primært på BFE (fordi det typisk er mest stabilt på tværs af BBR-objekter).
-      const bfeListForGrundOgEjd = collectBfeNumbersFromBuildings(data, bfeNumber);
+      const bfeListForGrundOgEjd = bfeCombined;
 
       let grundOnly = [];
       for (let i = 0; i < bfeListForGrundOgEjd.length; i++) {
@@ -2115,6 +2671,27 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
           ejendomsrelationOnly.push(tmpEjd);
         }
       }
+
+    let buildingsOnly = Array.isArray(data) ? data : [];
+
+      // Ved fx ejerlejligheder kan bygningsdata ligge på en "moderejendom" BFE.
+      // Udled derfor relaterede BFE-numre fra ejendomsrelationer og hent bygninger derfra.
+      const relatedBfeFromEjendomsrelation = collectRelatedBfeNumbersFromEjendomsrelation(ejendomsrelationOnly, bfeCombined);
+      if (relatedBfeFromEjendomsrelation.length > 0) {
+        console.log("Relaterede BFE-numre fra ejendomsrelation:", relatedBfeFromEjendomsrelation);
+        for (let i = 0; i < relatedBfeFromEjendomsrelation.length; i++) {
+          const relBfe = relatedBfeFromEjendomsrelation[i];
+          try {
+            const relatedBuildings = await fetchBBRData(null, relBfe);
+            if (Array.isArray(relatedBuildings) && relatedBuildings.length > 0) {
+              buildingsOnly = buildingsOnly.concat(relatedBuildings);
+            }
+          } catch (relErr) {
+            console.warn("Bygningsopslag via relateret BFE fejlede for", relBfe, relErr);
+          }
+        }
+      }
+
       // Enhed: brug adresseIdentificerer (adresse-id) når det findes.
       // Det virker både for almindelige huse og for adresser med etage/dør.
       let enhedOnly = [];
@@ -2137,9 +2714,172 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
           enhedOnly.push(tmpEnhed2);
         }
       }
+// --- EKSTRA FALLBACK: hent bygninger via BFE fra enheder ---
+      // Hvis der (endnu) ikke er fundet bygninger via husnummer/BFE,
+      // men vi HAR enheder, så prøv at hente bygninger via BFE på enhederne.
+      if (buildingsOnly.length === 0 && Array.isArray(enhedOnly) && enhedOnly.length > 0) {
+        // NYT: fjern dubletter i buildingsOnly baseret på id_lokalId
+buildingsOnly = Array.from(new Map(buildingsOnly.map(b => {
+  const obj = (b && b.bygning) ? b.bygning : b;
+  const id = obj && (obj.id_lokalId || obj.id) ? (obj.id_lokalId || obj.id) : JSON.stringify(obj);
+  return [id, b];
+})).values());
+        console.log("Fallback: prøver bygninger via BFE fra enheder", enhedOnly);
+        
+        const bfeFromEnhederSet = new Set();
+        enhedOnly.forEach(e => {
+          const bfeVal = findFirstMatchingField(e, /bfe.*nummer/i);
+          if (bfeVal != null && String(bfeVal).trim() !== "") {
+            bfeFromEnhederSet.add(String(bfeVal).trim());
+          }
+        });
+        const bfeFromEnheder = Array.from(bfeFromEnhederSet);
+        for (const bfe of bfeFromEnheder) {
+          try {
+            const extraBuildings = await fetchBBRData(null, bfe);
+            if (Array.isArray(extraBuildings) && extraBuildings.length > 0) {
+              buildingsOnly = buildingsOnly.concat(extraBuildings);
+            }
+          } catch (err) {
+            console.warn("Ekstra BBR-opslag via BFE fra enhed fejlede for", bfe, err);
+          }
+        }
+      }
 
-      const buildingsOnly = Array.isArray(data) ? data : [];
+      // --- EKSTRA FALLBACK 2: bygninger via Ejendomsbeliggenhed ---
+      // Hvis vi STADIG ikke har nogen bygninger, så brug Ejendomsbeliggenhed
+      // til at finde relevante BFE-numre og prøv igen.
+      if (buildingsOnly.length === 0) {
+        try {
+          // BFE-kandidater: direkte BFE + BFE fra enheder
+          const baseBfeList   = collectBfeNumbersFromBuildings(data, bfeNumber);
+          const enhedBfeList  = collectBfeNumbersFromEnheder(enhedOnly);
+          const allBfeCandSet = new Set([
+            ...baseBfeList,
+            ...enhedBfeList
+          ]);
+          const allBfeCandidates = Array.from(allBfeCandSet);
+
+          if (allBfeCandidates.length > 0) {
+            console.log("Ejendomsbeliggenhed-fallback: BFE-kandidater", allBfeCandidates);
+            const ejdListe = await fetchEjendomsbeliggenhedForBFE(allBfeCandidates);
+            const ekstraBfeSet = new Set();
+
+            (ejdListe || []).forEach(ejd => {
+              const props = ejd && ejd.properties ? ejd.properties : ejd;
+              if (!props || typeof props !== "object") return;
+
+              // typisk felt: bestemtFastEjendomBFENr
+              const bfeVal =
+                props.bestemtFastEjendomBFENr ||
+                findFirstMatchingField(props, /bestemt.*bfe.*nummer/i);
+
+              if (bfeVal != null && String(bfeVal).trim() !== "") {
+                ekstraBfeSet.add(String(bfeVal).trim());
+              }
+            });
+
+            const ekstraBfe = Array.from(ekstraBfeSet);
+            console.log("Ejendomsbeliggenhed-fallback: ekstra BFE", ekstraBfe);
+
+            for (const bfe of ekstraBfe) {
+              try {
+                const extraBuildings = await fetchBBRData(null, bfe);
+                if (Array.isArray(extraBuildings) && extraBuildings.length > 0) {
+                  buildingsOnly = buildingsOnly.concat(extraBuildings);
+                }
+              } catch (err) {
+                console.warn("BBR-opslag via Ejendomsbeliggenhed BFE fejlede for", bfe, err);
+              }
+            }
+          }
+            } catch (err) {
+      console.warn("Fejl i Ejendomsbeliggenhed-fallback:", err);
+    }
+  }
+
+  // --- EKSTRA: bygninger via grund-id (bygning?grund) ---
+  // Hvis vi har fundet grunde (grundOnly), så prøv også at hente bygninger
+  // ved hjælp af grundens id (samme mønster som BBR.dk bruger).
+  if (Array.isArray(grundOnly) && grundOnly.length > 0) {
+    let extraBuildingsFromGrund = [];
+
+    for (let i = 0; i < grundOnly.length; i++) {
+      const g = grundOnly[i];
+
+      // Prøv at finde et grund-id (lokalId/id) i objektet
+      const grundId =
+        pickFirst(g, [/id_lokalId/i, /idlokalid/i, /id/i]) ||
+        (g.grund && (g.grund.id_lokalId || g.grund.id));
+
+      if (!grundId) continue;
+
+      try {
+        const qs = new URLSearchParams();
+        qs.set("grund", grundId);
+        qs.set("pagesize", "9999");
+        qs.set("page", "1");
+
+        const resp = await fetch(`${BBR_PROXY}/bygning?${qs.toString()}`);
+        if (!resp.ok) {
+          console.warn("bygning?grund-fejl for", grundId, resp.status);
+          continue;
+        }
+
+        const tmpByg = await resp.json();
+        if (Array.isArray(tmpByg) && tmpByg.length > 0) {
+          extraBuildingsFromGrund = extraBuildingsFromGrund.concat(tmpByg);
+        }
+      } catch (e) {
+        console.warn("Fejl ved bygning?grund for", grundId, e);
+      }
+    }
+
+    if (extraBuildingsFromGrund.length > 0) {
+      buildingsOnly = buildingsOnly.concat(extraBuildingsFromGrund);
+buildingsOnly = dedupeById(buildingsOnly);
+    }
+  }
+
       const tekniskeOnly = Array.isArray(tekniske) ? tekniske : [];
+    // Fjern dubletter igen efter evt. fallback-kald, før vi tjekker hasAnyBBR
+buildingsOnly = Array.from(new Map(buildingsOnly.map(b => {
+  const obj = (b && b.bygning) ? b.bygning : b;
+  const id = obj && (obj.id_lokalId || obj.id) ? (obj.id_lokalId || obj.id) : JSON.stringify(obj);
+  return [id, b];
+})).values());
+
+const usedMarkerCoordsMap = new Map();
+    
+      // ----- TEKNISKE ANLÆG: tilføj markører på kortet (T1, T2, ...) -----
+if (tekniskeOnly.length > 0) {
+  tekniskeOnly.forEach((t, tIdx) => {
+    const ll = getTekniskAnlaegLatLon(t, fallbackLat, fallbackLon);
+    if (!ll) return;
+
+    const tLat = ll[0];
+    const tLon = ll[1];
+
+    const labelText = `T${tIdx + 1}`;
+
+    const iconHtml = `<div class="bbr-tech-icon">${labelText}</div>`;
+    const techIcon = L.divIcon({
+      html: iconHtml,
+      className: "bbr-tech-icon-wrapper",
+      iconSize: [24, 24],
+      iconAnchor: [12, 12]
+    });
+
+    const resolvedTechLatLon = resolveOverlappingMarkerLatLon(tLat, tLon, "tech", usedMarkerCoordsMap);
+    const m = L.marker([resolvedTechLatLon[0], resolvedTechLatLon[1]], { icon: techIcon });
+
+    m.bindPopup(renderTekniskAnlaegPopupHtml(t, tIdx));
+
+    // Genbrug samme layer som bygninger, så din eksisterende "addTo(map)" logik virker
+    m.addTo(bbrBuildingsLayer);
+  });
+}
+      
       // Hvis der slet ingen BBR‑objekter er (hverken bygninger,
       // tekniske anlæg, grund, enheder eller ejendomsrelationer)
       const hasAnyBBR =
@@ -2173,6 +2913,25 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
 `;
 
       // ----- BYGNINGER (som før) -----
+      // NYT: tegn ejendomsfolier (parcelpolygoner) for hver grund-id
+if (buildingsOnly && buildingsOnly.length > 0) {
+  // Indsaml unikke grund-id'er (id_lokalId)
+  const grundIds = collectGrundIdsFromBuildings(buildingsOnly);
+
+  // Kør async uden await (vi er i forEach-callback)
+  grundIds.forEach((gid) => {
+    fetchJordstykkeGeoJSON(gid)
+      .then((geoData) => {
+        if (geoData && geoData.features) {
+          L.geoJSON(geoData).addTo(bbrFootprintsLayer);
+        }
+      })
+      .catch((e) => {
+        console.warn("Fejl ved indlæsning af ejendomsareal for grund:", gid, e);
+      });
+  });
+}
+    
       buildingsOnly.forEach((b, idx) => {
         const building = (b && b.bygning) ? b.bygning : b;
 
@@ -2283,6 +3042,21 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
         let bLat = null;
         let bLon = null;
 
+                // NYT: understøt byg404Koordinat (WKT POINT i EPSG:25832)
+        // Datafordeler BBRPublic returnerer ofte kun punktet her – ikke building.geometri
+        if (typeof building["byg404Koordinat"] === "string") {
+          const m = building["byg404Koordinat"].match(/POINT\s*\(\s*([0-9.+-]+)\s+([0-9.+-]+)\s*\)/i);
+          if (m) {
+            // WKT POINT(x y) hvor x/y er EPSG:25832 (UTM32)
+            const x = parseFloat(m[1]);
+            const y = parseFloat(m[2]);
+            if (!isNaN(x) && !isNaN(y)) {
+              bLon = x;
+              bLat = y;
+            }
+          }
+        }
+        
         if (building.geometri && Array.isArray(building.geometri.koordinater)) {
           const c = building.geometri.koordinater;
           if (c.length >= 2) {
@@ -2309,7 +3083,7 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
             bLon = converted[1];
           }
 
-          const labelText = bygningsnr != null ? String(bygningsnr) : String(idx + 1);
+          const labelText = String(idx + 1);
 
           const iconHtml = `<div class="bbr-building-icon">${labelText}</div>`;
           const buildingIcon = L.divIcon({
@@ -2319,7 +3093,8 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
             iconAnchor: [12, 12]
           });
 
-          const m = L.marker([bLat, bLon], { icon: buildingIcon });
+          const resolvedBuildingLatLon = resolveOverlappingMarkerLatLon(bLat, bLon, "building", usedMarkerCoordsMap);
+          const m = L.marker([resolvedBuildingLatLon[0], resolvedBuildingLatLon[1]], { icon: buildingIcon });
           m.addTo(bbrBuildingsLayer);
         }
       });
@@ -2331,8 +3106,10 @@ function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
 `;
 
         tekniskeOnly.forEach((t, tIdx) => {
+          const techSummary = summarizeTekniskAnlaeg(t);
           html += `<details>
-  <summary>Teknisk anlæg ${tIdx + 1}</summary>
+  <summary>Teknisk anlæg ${tIdx + 1} – ${escapeHtml(techSummary.title)}</summary>
+  ${renderKeyValueList(techSummary.pairs)}
   <details>
     <summary>Vis rå teknisk anlæg-data</summary>
     <pre>${JSON.stringify(t, null, 2)}</pre>
@@ -2465,6 +3242,11 @@ if (Array.isArray(ejendomsrelationOnly) && ejendomsrelationOnly.length > 0) {
       if (bbrBuildingsLayer.getLayers().length > 0) {
         bbrBuildingsLayer.addTo(map);
       }
+
+    // Tilføj også folierne til kortet, hvis vi har polygoner
+if (bbrFootprintsLayer.getLayers().length > 0) {
+  bbrFootprintsLayer.addTo(map);
+}
 
       bbrBox.innerHTML = html;
 
@@ -3359,6 +4141,17 @@ function doSearch(query, listElement) {
               //  - adresseData giver adgang til husnummerId til BBR
               //  - obj.tekst bruges som visnings-tekst (enheds-adresse)
               updateInfoBox(adresseData, lat, lon, obj.tekst);
+              // NYT: hent og vis BBR-data (bygninger, tekniske anlæg, ejendomsrelationer mm.)
+              // bbrId = husnummerId (adgangsadresse-id)
+              // adresseId = adresseData.id (enheds-adresse-id)
+              const bbrId     = adresseData.husnummerId || null;
+              const adresseId = adresseData.id || null;
+              const bfeNumber = extractBfeNumberFromAdresse(adresseData) || null;
+              if (bbrId || bfeNumber) {
+                renderBBRInfo(bbrId, adresseId, lat, lon, bfeNumber);
+              } else {
+                hideBBRInfo();
+              }
 
               resultsList.innerHTML = "";
               resultsList.style.display = "none";
@@ -3744,23 +4537,37 @@ function toggleCircle(radius) {
     // Ingen ladestander-lag i Brand-version
   }
 }
-document.getElementById("btn10").addEventListener("click", function() {
-  selectedRadius = 10000;
-  toggleCircle(10000);
-});
-document.getElementById("btn25").addEventListener("click", function() {
-  selectedRadius = 25000;
-  toggleCircle(25000);
-});
-document.getElementById("btn50").addEventListener("click", function() {
-  selectedRadius = 50000;
-  toggleCircle(50000);
-});
-document.getElementById("btn100").addEventListener("click", function() {
-  selectedRadius = 100000;
-  toggleCircle(100000);
-});
+const btn10 = document.getElementById("btn10");
+if (btn10) {
+  btn10.addEventListener("click", function() {
+    selectedRadius = 10000;
+    toggleCircle(10000);
+  });
+}
 
+const btn25 = document.getElementById("btn25");
+if (btn25) {
+  btn25.addEventListener("click", function() {
+    selectedRadius = 25000;
+    toggleCircle(25000);
+  });
+}
+
+const btn50 = document.getElementById("btn50");
+if (btn50) {
+  btn50.addEventListener("click", function() {
+    selectedRadius = 50000;
+    toggleCircle(50000);
+  });
+}
+
+const btn100 = document.getElementById("btn100");
+if (btn100) {
+  btn100.addEventListener("click", function() {
+    selectedRadius = 100000;
+    toggleCircle(100000);
+  });
+}
 /*
  * DOMContentLoaded
  */
