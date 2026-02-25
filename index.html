@@ -35,7 +35,7 @@
     <input type="text" id="search" placeholder="Søg efter adresse eller sted...">
     <span class="clear-button" id="clearSearch">&times;</span>
   </div>
-  <button id="routeToggleBtn" style="width:80px; height:40px; font-size:14px; cursor:pointer;">
+  <button id="routeToggleBtn" class="compact-action-btn">
     Rute
   </button>
 </div>
@@ -112,7 +112,7 @@
           <ul id="results-vej2" class="autocomplete-list"></ul>
         </div>
         <!-- "Find X" -->
-        <button id="findKrydsBtn" style="width:80px; height:40px; font-size:14px; cursor:pointer;">
+        <button id="findKrydsBtn" class="compact-action-btn">
           Find X
         </button>
       </div>
@@ -125,8 +125,8 @@
       <!-- Én samlet infoboks – alle oplysninger kommer her -->
       <div id="infoBox">
         <div class="info-upper-box">
-          <a id="streetviewLink" href="#" target="_blank">Åbn i Google Street View</a>
-          <a id="skraafotoLink" href="#" target="_blank" style="display:none;">Åbn i skråfoto</a>
+          <a id="streetviewLink" href="#" target="_blank" rel="noopener noreferrer">Åbn i Google Street View</a>
+          <a id="skraafotoLink" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">Åbn i skråfoto</a>
         </div>
         <div class="info-lower-box">
           <p id="address"></p>
