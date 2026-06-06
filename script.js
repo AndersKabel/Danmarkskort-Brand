@@ -1456,13 +1456,17 @@ function extractBfeNumberFromAdresse(data) {
 }
 
 /**
- * Hent BBR-data for en adgangsadresse (bygninger) via Cloudflare BBR-proxyen.
- * Returnerer en liste af bygninger eller null ved fejl.
- */
-/**
  * Hent BBR-data for en adresse (bygninger) via Cloudflare BBR-proxyen.
- * Vi prøver først med husnummer-id (adgangsadresse-ID) og falder derefter
- * tilbage til BFE-nummer (ejendomsnummer) hvis ingen bygning findes via husnummer.
+ *
+ * Bekræftet kæde (jun 2025):
+ *   1) enhed?adresseIdentificerer=<adresseId>  → bygning-UUID i enhed.bygning
+ *   2) bygning?id=<UUID>                        → fulde bygningsdata
+ *
+ * Virker for BÅDE almindelige adresser og etageejendomme/ejerlejligheder,
+ * fordi BBR altid knytter en enhed til sin bygning via UUID.
+ *
+ * Eksisterende fallbacks (husnummer, bfenummer, DAR_BFE) bevares som
+ * sikkerhedsnet i tilfælde af at enhed-opslaget ikke giver data.
  */
 async function fetchBBRData(bbrId, bfeNumber) {
   try {
@@ -1471,18 +1475,78 @@ async function fetchBBRData(bbrId, bfeNumber) {
       return [];
     }
 
-    const urls = [];
+    // ----------------------------------------------------------------
+    // PRIMÆR VEJ: enhed → bygning-UUID → bygning
+    // Bruger lastSelectedAdresseIdForBBR (enheds-adresse-id, sat i
+    // renderBBRInfo) som nøgle til enhed-opslaget.
+    // ----------------------------------------------------------------
+    try {
+      const adrId = (lastSelectedAdresseIdForBBR != null && String(lastSelectedAdresseIdForBBR).trim() !== "")
+        ? String(lastSelectedAdresseIdForBBR).trim()
+        : null;
 
-    // 1) Prøv husnummer-id først, hvis vi har et
+      if (adrId) {
+        const enhedResp = await fetch(
+          `${BBR_PROXY}/enhed?adresseIdentificerer=${encodeURIComponent(adrId)}`,
+          { method: "GET" }
+        );
+
+        if (enhedResp.ok) {
+          const enhedData = await enhedResp.json();
+          const enheder = Array.isArray(enhedData) ? enhedData : (enhedData ? [enhedData] : []);
+
+          // Saml unikke bygnings-UUID'er fra alle enheder på adressen
+          const bygningUUIDs = new Set();
+          enheder.forEach(e => {
+            const uuid = e && (e.bygning || (e.enhed && e.enhed.bygning));
+            if (uuid && typeof uuid === "string" && uuid.trim() !== "") {
+              bygningUUIDs.add(uuid.trim());
+            }
+          });
+
+          if (bygningUUIDs.size > 0) {
+            const buildings = [];
+            for (const uuid of bygningUUIDs) {
+              try {
+                const bygResp = await fetch(
+                  `${BBR_PROXY}/bygning?id=${encodeURIComponent(uuid)}`,
+                  { method: "GET" }
+                );
+                if (!bygResp.ok) continue;
+                const bygData = await bygResp.json();
+                if (Array.isArray(bygData) && bygData.length > 0) {
+                  buildings.push(...bygData);
+                } else if (bygData && typeof bygData === "object" && !Array.isArray(bygData)) {
+                  buildings.push(bygData);
+                }
+              } catch (e) {
+                console.warn("fetchBBRData: bygning?id fejlede for UUID", uuid, e);
+              }
+            }
+            if (buildings.length > 0) {
+              console.log("fetchBBRData: fandt bygning(er) via enhed→UUID", buildings.length);
+              return buildings;
+            }
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("fetchBBRData: enhed→UUID-kæde fejlede, forsøger fallbacks", e);
+    }
+
+    // ----------------------------------------------------------------
+    // FALLBACK 1: bygning?husnummer og bygning?bfenummer
+    // Virker for simple enfamiliehuse der er registreret direkte på
+    // husnummer. Bruges som sikkerhedsnet.
+    // ----------------------------------------------------------------
+    const urls = [];
     if (bbrId) {
       urls.push(`${BBR_PROXY}/bygning?husnummer=${encodeURIComponent(bbrId)}`);
     }
-    // 2) Fald tilbage til BFE-nummer
     if (bfeNumber) {
       urls.push(`${BBR_PROXY}/bygning?bfenummer=${encodeURIComponent(bfeNumber)}`);
     }
 
-    // Prøv husnummer og BFE i rækkefølge
     for (let i = 0; i < urls.length; i++) {
       const url = urls[i];
       try {
@@ -1493,7 +1557,6 @@ async function fetchBBRData(bbrId, bfeNumber) {
         }
         const data = await resp.json();
         if (Array.isArray(data) && data.length > 0) {
-          // Returnér alle bygninger uden filtrering
           return data;
         }
       } catch (innerErr) {
@@ -1501,98 +1564,31 @@ async function fetchBBRData(bbrId, bfeNumber) {
       }
     }
 
-    /*
-    // Hvis ingen bygninger er fundet, prøv Datafordeler via bbr-proxy:
-    // Først via husnummerTilBygningBfe, derefter adresseTilEnhedBfe
-    if (bbrId) {
-      // Fallback 1: husnummerTilBygningBfe
-      try {
-        const bfeResp1 = await fetch(`${BBR_PROXY}/husnummerTilBygningBfe?husnummerId=${encodeURIComponent(bbrId)}`);
-        if (bfeResp1.ok) {
-          const bfeData = await bfeResp1.json();
-          let bfeList = [];
-          const process = obj => {
-            const val = findFirstMatchingField(obj, /bfe.*nummer/i);
-            if (val != null) bfeList.push(String(val));
-          };
-          if (Array.isArray(bfeData)) {
-            bfeData.forEach(process);
-          } else if (typeof bfeData === "object") {
-            process(bfeData);
-          }
-          bfeList = Array.from(new Set(bfeList));
-          for (const bfe of bfeList) {
-            try {
-              const bfeRespData = await fetch(`${BBR_PROXY}/bygning?bfenummer=${encodeURIComponent(bfe)}`);
-              if (bfeRespData.ok) {
-                const buildings = await bfeRespData.json();
-                if (Array.isArray(buildings) && buildings.length > 0) {
-                  return buildings;
-                }
-              }
-            } catch (err) {
-              console.warn("BBR BFE-opslag-fejl for", bfe, err);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn("Fejl ved husnummerTilBygningBfe-fallback:", err);
-      }
-
-      // Fallback 2: adresseTilEnhedBfe
-      try {
-        const bfeResp2 = await fetch(`${BBR_PROXY}/adresseTilEnhedBfe?adresseId=${encodeURIComponent(bbrId)}`);
-        if (bfeResp2.ok) {
-          const bfeData2 = await bfeResp2.json();
-          let bfeList2 = [];
-          const process2 = obj => {
-            const val = findFirstMatchingField(obj, /bfe.*nummer/i);
-            if (val != null) bfeList2.push(String(val));
-          };
-          if (Array.isArray(bfeData2)) {
-            bfeData2.forEach(process2);
-          } else if (typeof bfeData2 === "object") {
-            process2(bfeData2);
-          }
-          bfeList2 = Array.from(new Set(bfeList2));
-          for (const bfe of bfeList2) {
-            try {
-              const bfeRespData2 = await fetch(`${BBR_PROXY}/bygning?bfenummer=${encodeURIComponent(bfe)}`);
-              if (bfeRespData2.ok) {
-                const buildings2 = await bfeRespData2.json();
-                if (Array.isArray(buildings2) && buildings2.length > 0) {
-                  return buildings2;
-                }
-              }
-            } catch (err) {
-              console.warn("BBR BFE-opslag-fejl (adresse) for", bfe, err);
-            }
-          }
-        }
-      } catch (err) {
-        console.warn("Fejl ved adresseTilEnhedBfe-fallback:", err);
-      }
-    }
-*/
-        // Ingen bygninger fundet via direkte /bygning-opslag.
-    // NYT: DOBBELT DAR_BFE-kald (begge sendes hver gang), og brug det der giver data.
+    // ----------------------------------------------------------------
+    // FALLBACK 2: DAR_BFE dual-kald (husnummerTilBygningBfe +
+    // adresseTilEnhedBfe) → bygning?bfenummer
+    // Bevares som sidste sikkerhedsnet selvom begge endpoints
+    // p.t. giver 500-fejl – de kan evt. blive rettet i fremtiden.
+    // ----------------------------------------------------------------
     try {
       const husId = (bbrId != null && String(bbrId).trim() !== "")
         ? String(bbrId).trim()
         : (lastSelectedHusnummerIdForBBR != null ? String(lastSelectedHusnummerIdForBBR).trim() : null);
 
-      const adrId = (lastSelectedAdresseIdForBBR != null && String(lastSelectedAdresseIdForBBR).trim() !== "")
+      const adrId2 = (lastSelectedAdresseIdForBBR != null && String(lastSelectedAdresseIdForBBR).trim() !== "")
         ? String(lastSelectedAdresseIdForBBR).trim()
         : null;
 
-      const bfeList = await fetchBfeNumbersViaDarBfeDual(husId, adrId);
+      const bfeList = await fetchBfeNumbersViaDarBfeDual(husId, adrId2);
 
-      // Hvis vi fik BFE-numre, så prøv at hente bygninger via BFE
       if (Array.isArray(bfeList) && bfeList.length > 0) {
         for (let i = 0; i < bfeList.length; i++) {
           const bfe = bfeList[i];
           try {
-            const resp = await fetch(`${BBR_PROXY}/bygning?bfenummer=${encodeURIComponent(bfe)}`, { method: "GET" });
+            const resp = await fetch(
+              `${BBR_PROXY}/bygning?bfenummer=${encodeURIComponent(bfe)}`,
+              { method: "GET" }
+            );
             if (!resp.ok) continue;
             const buildings = await resp.json();
             if (Array.isArray(buildings) && buildings.length > 0) {
