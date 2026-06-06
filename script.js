@@ -1721,6 +1721,42 @@ async function fetchBBRTekniskeAnlaeg(husnummerId, bfeNumber) {
   }
 }
 
+/**
+ * Filtrer bygninger så kun aktive/gyldige vises – samme logik som BBR.dk.
+ *
+ * BBR byg026Bygningsstatus koder der BEHOLDES (aktive):
+ *   1 = Bygning under opførelse
+ *   2 = Midlertidigt opført bygning
+ *   3 = Bygning opført (taget i brug / gyldig)
+ *   6 = Bygning oprettet (ældre gyldige bygninger)
+ *
+ * Alt andet (5, 7, 10, 20, 30, 40+ osv.) er nedrevet, historisk
+ * eller udgået og filtreres fra.
+ */
+function filterActiveBuildingsOnly(buildings) {
+  const ACTIVE_STATUS = new Set(["1", "2", "3", "6"]);
+
+  return (buildings || []).filter(b => {
+    const building = (b && b.bygning) ? b.bygning : b;
+    if (!building || typeof building !== "object") return false;
+
+    // Primært felt: byg026Bygningsstatus
+    const statusRaw =
+      building["byg026Bygningsstatus"] ??
+      building["bygningsstatus"] ??
+      building["status"] ??
+      null;
+
+    // Hvis status ikke er sat, behold bygningen (vi ved ikke om den er inaktiv)
+    if (statusRaw === null || statusRaw === undefined || String(statusRaw).trim() === "") {
+      return true;
+    }
+
+    const statusStr = String(statusRaw).trim();
+    return ACTIVE_STATUS.has(statusStr);
+  });
+}
+
 function dedupeById(arr) {
   const seen = new Set();
   return (arr || []).filter(item => {
@@ -2940,56 +2976,21 @@ buildingsOnly = Array.from(new Map(buildingsOnly.map(b => {
     }
   }
 
-  // --- EKSTRA: bygninger via grund-id (bygning?grund) ---
-  // Hvis vi har fundet grunde (grundOnly), så prøv også at hente bygninger
-  // ved hjælp af grundens id (samme mønster som BBR.dk bruger).
-  if (Array.isArray(grundOnly) && grundOnly.length > 0) {
-    let extraBuildingsFromGrund = [];
-
-    for (let i = 0; i < grundOnly.length; i++) {
-      const g = grundOnly[i];
-
-      // Prøv at finde et grund-id (lokalId/id) i objektet
-      const grundId =
-        pickFirst(g, [/id_lokalId/i, /idlokalid/i, /id/i]) ||
-        (g.grund && (g.grund.id_lokalId || g.grund.id));
-
-      if (!grundId) continue;
-
-      try {
-        const qs = new URLSearchParams();
-        qs.set("grund", grundId);
-        qs.set("pagesize", "9999");
-        qs.set("page", "1");
-
-        const resp = await fetch(`${BBR_PROXY}/bygning?${qs.toString()}`);
-        if (!resp.ok) {
-          console.warn("bygning?grund-fejl for", grundId, resp.status);
-          continue;
-        }
-
-        const tmpByg = await resp.json();
-        if (Array.isArray(tmpByg) && tmpByg.length > 0) {
-          extraBuildingsFromGrund = extraBuildingsFromGrund.concat(tmpByg);
-        }
-      } catch (e) {
-        console.warn("Fejl ved bygning?grund for", grundId, e);
-      }
-    }
-
-    if (extraBuildingsFromGrund.length > 0) {
-      buildingsOnly = buildingsOnly.concat(extraBuildingsFromGrund);
-buildingsOnly = dedupeById(buildingsOnly);
-    }
-  }
+  // bygning?grund-fallbacken er fjernet – den hentede alle bygninger på matriklen
+  // inkl. nedrevne/historiske, og gav dermed for mange resultater.
+  // Den nye enhed→UUID→bygning-kæde er tilstrækkelig for alle adressetyper.
 
       const tekniskeOnly = Array.isArray(tekniske) ? tekniske : [];
-    // Fjern dubletter igen efter evt. fallback-kald, før vi tjekker hasAnyBBR
+    // Fjern dubletter igen efter evt. fallback-kald
 buildingsOnly = Array.from(new Map(buildingsOnly.map(b => {
   const obj = (b && b.bygning) ? b.bygning : b;
   const id = obj && (obj.id_lokalId || obj.id) ? (obj.id_lokalId || obj.id) : JSON.stringify(obj);
   return [id, b];
 })).values());
+
+    // Filtrer inaktive/nedrevne/historiske bygninger fra – samme logik som BBR.dk
+    buildingsOnly = filterActiveBuildingsOnly(buildingsOnly);
+    console.log("Bygninger efter statusfilter:", buildingsOnly.length);
 
 const usedMarkerCoordsMap = new Map();
     
