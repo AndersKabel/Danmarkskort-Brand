@@ -897,6 +897,9 @@ var bbrFootprintsLayer = L.geoJSON(null, {
   }
 });
 
+// Lag til brandposter (hentes fra OpenStreetMap via Overpass API)
+var hydrantLayer = L.layerGroup();
+
 // Seneste DK-adressevalg (bruges til at kunne sende DOBBELT DAR_BFE-kald hver gang)
 var lastSelectedHusnummerIdForBBR = null; // adgangsadresse-id (husnummerId)
 var lastSelectedAdresseIdForBBR = null;   // enhedsadresse-id (adresseId)
@@ -915,9 +918,9 @@ const overlayMaps = {
   "Falck Ass": falckAssLayer,
   "Kommunegrænser": kommunegrænserLayer,
   "Rutenummereret vejnet": rutenummerLayer,
-  // NYT: overlay til at beholde markører
   "Behold markører": keepMarkersLayer,
-    "BBR-matrikel": bbrFootprintsLayer
+  "BBR-matrikel": bbrFootprintsLayer,
+  "Brandposter (OSM)": hydrantLayer
 };
 
 // Tilføj vejrlag, hvis API-nøgle er sat
@@ -1356,6 +1359,8 @@ async function updateInfoBox(data, lat, lon, enhedsLabel) {
       // Videresend til BBR-visningsfunktionen med både husnummer-id og BFE
             const adresseIdForEnhed = (data && data.id) ? data.id : null;
       renderBBRInfo(bbrId, adresseIdForEnhed, lat, lon, bfeNumber);
+      // Hent brandposter i 500m radius automatisk
+      fetchAndShowHydrants(lat, lon, 500);
 
     } else {
       const bbrBox = document.getElementById("bbrInfoBox");
@@ -2488,18 +2493,151 @@ function parseWKTGeometryLatLon(wkt) {
   }
 }
 
-// Henter ejendomsgrænser (jordstykker) som GeoJSON fra Dataforsyningen ved featureId
-async function fetchJordstykkeGeoJSON(featureId) {
-  const url = `https://api.dataforsyningen.dk/jordstykker?featureid=${featureId}`;
-  const resp = await fetch(url);
-  if (!resp.ok) return [];
+/**
+ * Hent matrikelgrænser (jordstykker) som GeoJSON fra Dataforsyningen.
+ *
+ * Strategien: Vi prøver to API-kald i rækkefølge:
+ *   1) /jordstykker?husnummer=<adgangsadresseId>   (pålideligt for de fleste adresser)
+ *   2) /jordstykker?featureid=<featureId>           (fallback)
+ *
+ * Begge returnerer GeoJSON FeatureCollection med polygon-geometri.
+ */
+async function fetchJordstykkeGeoJSON(featureId, husnummerId) {
+  const tries = [];
+
+  // Prøv husnummerId først – det er det mest pålidelige parameter
+  if (husnummerId) {
+    tries.push(`https://api.dataforsyningen.dk/jordstykker?husnummer=${encodeURIComponent(husnummerId)}&format=geojson`);
+  }
+  // Fallback: featureId (grundens lokalId)
+  if (featureId) {
+    tries.push(`https://api.dataforsyningen.dk/jordstykker?featureid=${encodeURIComponent(featureId)}&format=geojson`);
+  }
+
+  for (const url of tries) {
+    try {
+      const resp = await fetch(url);
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      // Tjek om vi fik noget brugbart
+      if (data && data.features && data.features.length > 0) {
+        return data;
+      }
+      if (Array.isArray(data) && data.length > 0) {
+        return data;
+      }
+    } catch (e) {
+      console.warn("Fejl ved parsning af jordstykke-JSON fra", url, e);
+    }
+  }
+  return null;
+}
+
+/**
+ * Hent brandposter (fire hydrants) fra OpenStreetMap via Overpass API
+ * inden for en given radius (default 500m) fra et koordinat.
+ * Vises som røde markører på hydrantLayer.
+ */
+async function fetchAndShowHydrants(lat, lon, radiusM) {
+  const radius = radiusM || 500;
+
+  // Ryd eksisterende brandpost-markører
+  hydrantLayer.clearLayers();
+
+  const query = `
+[out:json][timeout:15];
+node["emergency"="fire_hydrant"](around:${radius},${lat},${lon});
+out body;
+`;
+
   try {
+    const resp = await fetch("https://overpass-api.de/api/interpreter", {
+      method: "POST",
+      body: "data=" + encodeURIComponent(query)
+    });
+
+    if (!resp.ok) {
+      console.warn("Overpass API fejl:", resp.status);
+      return;
+    }
+
     const data = await resp.json();
-    // Returner GeoJSON-funktionen direkte (ejendomsgrænser som GeoJSON)
-    return data;
+    const elements = data.elements || [];
+
+    if (elements.length === 0) {
+      console.log("Ingen brandposter fundet inden for", radius, "m");
+      return;
+    }
+
+    // Ikon: rød cirkel med H
+    const hydrantIcon = L.divIcon({
+      html: `<div style="
+        background:#e02020;
+        color:white;
+        border-radius:50%;
+        width:22px;
+        height:22px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        font-weight:bold;
+        font-size:12px;
+        border:2px solid #8b0000;
+        box-shadow:0 1px 3px rgba(0,0,0,0.4);
+        line-height:1;">H</div>`,
+      className: "",
+      iconSize: [22, 22],
+      iconAnchor: [11, 11]
+    });
+
+    elements.forEach(el => {
+      if (!el.lat || !el.lon) return;
+
+      const tags = el.tags || {};
+
+      // Byg tooltip-tekst
+      const typeRaw   = tags["fire_hydrant:type"] || tags["hydrant:type"] || null;
+      const typeMap   = { underground: "Underjordisk", pillar: "Søjle/overground",
+                          wall: "Væghydrant", pond: "Branddamme" };
+      const typeText  = typeRaw ? (typeMap[typeRaw] || typeRaw) : null;
+      const diameter  = tags["fire_hydrant:diameter"] || tags["hydrant:diameter"] || null;
+      const pressure  = tags["fire_hydrant:pressure"] || null;
+      const ref       = tags["ref"] || tags["fire_hydrant:ref"] || null;
+
+      // Beregn afstand til klikpunkt
+      const dLat = (el.lat - lat) * 111320;
+      const dLon = (el.lon - lon) * 111320 * Math.cos(lat * Math.PI / 180);
+      const dist  = Math.round(Math.sqrt(dLat * dLat + dLon * dLon));
+
+      // Popup HTML
+      let popupHtml = `<strong>Brandpost</strong><br>`;
+      if (typeText)    popupHtml += `Type: ${typeText}<br>`;
+      if (diameter)    popupHtml += `Diameter: ${diameter} mm<br>`;
+      if (pressure)    popupHtml += `Tryk: ${pressure} bar<br>`;
+      if (ref)         popupHtml += `Ref: ${ref}<br>`;
+      popupHtml += `Afstand: ca. ${dist} m`;
+
+      // Tooltip (vises ved hover uden klik)
+      const tooltipText = [
+        typeText || "Brandpost",
+        diameter ? `\u00d8${diameter}mm` : null,
+        `${dist}m`
+      ].filter(Boolean).join(" \u00b7 ");
+
+      const m = L.marker([el.lat, el.lon], { icon: hydrantIcon });
+      m.bindTooltip(tooltipText, { permanent: false, direction: "top", offset: [0, -12] });
+      m.bindPopup(popupHtml);
+      m.addTo(hydrantLayer);
+    });
+
+    // Tilføj laget til kortet automatisk
+    if (!map.hasLayer(hydrantLayer)) {
+      hydrantLayer.addTo(map);
+    }
+
+    console.log(`Brandposter: ${elements.length} fundet inden for ${radius}m`);
   } catch (e) {
-    console.warn("Fejl ved parsning af jordstykke-JSON:", e);
-    return [];
+    console.warn("Fejl ved hentning af brandposter:", e);
   }
 }
 
@@ -2558,6 +2696,14 @@ function hideBBRInfo() {
     bbrBuildingsLayer.clearLayers();
     if (map.hasLayer(bbrBuildingsLayer)) {
       map.removeLayer(bbrBuildingsLayer);
+    }
+  }
+
+  // Ryd også brandposter og matrikellag når BBR lukkes
+  if (typeof hydrantLayer !== "undefined" && hydrantLayer) {
+    hydrantLayer.clearLayers();
+    if (map.hasLayer(hydrantLayer)) {
+      map.removeLayer(hydrantLayer);
     }
   }
 }
@@ -2909,23 +3055,48 @@ if (tekniskeOnly.length > 0) {
 `;
 
       // ----- BYGNINGER (som før) -----
-      // NYT: tegn ejendomsfolier (parcelpolygoner) for hver grund-id
+      // Tegn matrikelgrænser automatisk:
+      // Primær: via husnummerId (adgangsadresse-id, mest pålidelig)
+      // Fallback: via grund-id (lokalId fra BBR-bygningsdata)
 if (buildingsOnly && buildingsOnly.length > 0) {
-  // Indsaml unikke grund-id'er (id_lokalId)
-  const grundIds = collectGrundIdsFromBuildings(buildingsOnly);
+  // Stil med grøn kant og let fyld – nem at identificere på kortet
+  const matrikelStyle = {
+    color: "#1a7a1a",
+    weight: 2.5,
+    opacity: 0.9,
+    fillColor: "#2ecc71",
+    fillOpacity: 0.08
+  };
 
-  // Kør async uden await (vi er i forEach-callback)
-  grundIds.forEach((gid) => {
-    fetchJordstykkeGeoJSON(gid)
+  // Primær: brug husnummerId (adgangsadresse-id) – mest pålidelig på tværs af hustyper
+  const husId = lastSelectedHusnummerIdForBBR || null;
+  if (husId) {
+    fetchJordstykkeGeoJSON(null, husId)
       .then((geoData) => {
-        if (geoData && geoData.features) {
-          L.geoJSON(geoData).addTo(bbrFootprintsLayer);
+        if (geoData && geoData.features && geoData.features.length > 0) {
+          L.geoJSON(geoData, { style: matrikelStyle }).addTo(bbrFootprintsLayer);
+          if (!map.hasLayer(bbrFootprintsLayer)) {
+            bbrFootprintsLayer.addTo(map);
+          }
+        } else {
+          // Fallback: grund-id'er fra bygningsdata
+          const grundIds = collectGrundIdsFromBuildings(buildingsOnly);
+          grundIds.forEach((gid) => {
+            fetchJordstykkeGeoJSON(gid, null)
+              .then((geoData2) => {
+                if (geoData2 && geoData2.features && geoData2.features.length > 0) {
+                  L.geoJSON(geoData2, { style: matrikelStyle }).addTo(bbrFootprintsLayer);
+                  if (!map.hasLayer(bbrFootprintsLayer)) {
+                    bbrFootprintsLayer.addTo(map);
+                  }
+                }
+              })
+              .catch((e) => console.warn("Matrikel fallback fejl for grund:", gid, e));
+          });
         }
       })
-      .catch((e) => {
-        console.warn("Fejl ved indlæsning af ejendomsareal for grund:", gid, e);
-      });
-  });
+      .catch((e) => console.warn("Matrikel fejl for husnummer:", husId, e));
+  }
 }
     
       buildingsOnly.forEach((b, idx) => {
@@ -3091,6 +3262,20 @@ if (buildingsOnly && buildingsOnly.length > 0) {
 
           const resolvedBuildingLatLon = resolveOverlappingMarkerLatLon(bLat, bLon, "building", usedMarkerCoordsMap);
           const m = L.marker([resolvedBuildingLatLon[0], resolvedBuildingLatLon[1]], { icon: buildingIcon });
+
+          // Hover-tooltip med de vigtigste BBR-felter
+          const tooltipParts = [];
+          if (anvTekst)      tooltipParts.push(anvTekst.replace(/ \(kode.*\)$/, ""));
+          else if (anvKode)  tooltipParts.push("Anvendelse kode " + anvKode);
+          if (opfoerAar)     tooltipParts.push("Opf. " + opfoerAar);
+          if (antalEtager)   tooltipParts.push(antalEtager + " etage(r)");
+          if (samletAreal)   tooltipParts.push(samletAreal + " m²");
+          if (tagTekst)      tooltipParts.push("Tag: " + tagTekst.replace(/ \(kode.*\)$/, ""));
+          if (varmeTekst)    tooltipParts.push("Varme: " + varmeTekst.replace(/ \(kode.*\)$/, ""));
+          const tooltipHtml = "<strong>Bygning " + (idx + 1) + "</strong><br>" +
+            tooltipParts.map(function(p){ return "• " + p; }).join("<br>");
+          m.bindTooltip(tooltipHtml, { permanent: false, direction: "top", offset: [0, -14], opacity: 0.95 });
+
           m.addTo(bbrBuildingsLayer);
         }
       });
