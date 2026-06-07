@@ -1360,16 +1360,22 @@ async function updateInfoBox(data, lat, lon, enhedsLabel) {
       const adresseIdForEnhed = (data && data.id) ? data.id : null;
 
       // Udtræk ejerlav+matrikelnr fra DAR-svaret til matrikelindtegning
-      // DAR-struktur: data.adgangsadresse.jordstykke.ejerlav.kode + .matrikelnr
-      // Nogle svar har data.adgangsadresse som separat objekt, andre er fladet ud
-      const adgAdr = data?.adgangsadresse ?? data ?? null;
-      const jordstykke = adgAdr?.jordstykke ?? null;
-      const ejerlavskode = jordstykke?.ejerlav?.kode ?? null;
-      const matrikelnr   = jordstykke?.matrikelnr
-                        ?? adgAdr?.matrikelnr
-                        ?? data?.matrikelnr
-                        ?? null;
-      console.log("Matrikel udtræk:", { ejerlavskode, matrikelnr, jordstykke });
+      // DAR /adresser/{id} returnerer:
+      //   data.adgangsadresse.ejerlav.kode  (ejerlavskode)
+      //   data.adgangsadresse.matrikelnr    (matrikelnr)
+      //   data.adgangsadresse.jordstykke.ejerlav.kode  (alternativ sti)
+      const adgAdr = data?.adgangsadresse ?? null;
+      const ejerlavskode =
+        adgAdr?.ejerlav?.kode                    // primær: direkte på adgangsadresse
+        ?? adgAdr?.jordstykke?.ejerlav?.kode     // alternativ: via jordstykke
+        ?? data?.ejerlav?.kode                   // flad struktur
+        ?? null;
+      const matrikelnr =
+        adgAdr?.matrikelnr                       // primær: direkte på adgangsadresse
+        ?? adgAdr?.jordstykke?.matrikelnr        // alternativ: via jordstykke
+        ?? data?.matrikelnr                      // flad struktur
+        ?? null;
+      console.log("Matrikel udtræk:", { ejerlavskode, matrikelnr });
 
       renderBBRInfo(bbrId, adresseIdForEnhed, lat, lon, bfeNumber, ejerlavskode, matrikelnr);
       // Hent brandposter i 500m radius automatisk
@@ -2386,7 +2392,10 @@ const BBR_TEKNISK_STATUS = {
   "2": "Midlertidigt ude af drift",
   "3": "Permanent ude af drift",
   "6": "Afblændet",
-  "7": "Sløjfet"
+  "7": "Sløjfet",
+  "10": "Sløjfet/Fjernet",
+  "20": "Nedrevet",
+  "30": "Udgået"
 };
 
 const BBR_TEKNISK_STOERRELSESKLASSE = {
@@ -4416,18 +4425,8 @@ function doSearch(query, listElement) {
               // Opdater infoboksen:
               //  - adresseData giver adgang til husnummerId til BBR
               //  - obj.tekst bruges som visnings-tekst (enheds-adresse)
+              // updateInfoBox håndterer selv renderBBRInfo med ejerlav+matrikelnr
               updateInfoBox(adresseData, lat, lon, obj.tekst);
-              // NYT: hent og vis BBR-data (bygninger, tekniske anlæg, ejendomsrelationer mm.)
-              // bbrId = husnummerId (adgangsadresse-id)
-              // adresseId = adresseData.id (enheds-adresse-id)
-              const bbrId     = adresseData.husnummerId || null;
-              const adresseId = adresseData.id || null;
-              const bfeNumber = extractBfeNumberFromAdresse(adresseData) || null;
-              if (bbrId || bfeNumber) {
-                renderBBRInfo(bbrId, adresseId, lat, lon, bfeNumber);
-              } else {
-                hideBBRInfo();
-              }
 
               resultsList.innerHTML = "";
               resultsList.style.display = "none";
