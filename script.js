@@ -1357,8 +1357,15 @@ async function updateInfoBox(data, lat, lon, enhedsLabel) {
 
     if (bbrId || bfeNumber) {
       // Videresend til BBR-visningsfunktionen med både husnummer-id og BFE
-            const adresseIdForEnhed = (data && data.id) ? data.id : null;
-      renderBBRInfo(bbrId, adresseIdForEnhed, lat, lon, bfeNumber);
+      const adresseIdForEnhed = (data && data.id) ? data.id : null;
+
+      // Udtræk ejerlav+matrikelnr fra DAR-svaret til matrikelindtegning
+      // Struktur: data.adgangsadresse.jordstykke.ejerlav.kode + .matrikelnr
+      const jordstykke = data?.adgangsadresse?.jordstykke ?? null;
+      const ejerlavskode = jordstykke?.ejerlav?.kode ?? null;
+      const matrikelnr   = jordstykke?.matrikelnr ?? null;
+
+      renderBBRInfo(bbrId, adresseIdForEnhed, lat, lon, bfeNumber, ejerlavskode, matrikelnr);
       // Hent brandposter i 500m radius automatisk
       fetchAndShowHydrants(lat, lon, 500);
 
@@ -2530,43 +2537,41 @@ function parseWKTGeometryLatLon(wkt) {
 }
 
 /**
- * Hent matrikelgrænser (jordstykker) som GeoJSON fra Dataforsyningen.
+ * Hent matrikelgrænse (jordstykke) som GeoJSON fra Dataforsyningen.
  *
- * Strategien: Vi prøver to API-kald i rækkefølge:
- *   1) /jordstykker?husnummer=<adgangsadresseId>   (pålideligt for de fleste adresser)
- *   2) /jordstykker?featureid=<featureId>           (fallback)
+ * Bekræftet kæde (jun 2025):
+ *   /jordstykker/{ejerlavskode}/{matrikelnr}?format=geojson
+ *   → returnerer GeoJSON Feature med Polygon-geometri i EPSG:4326
  *
- * Begge returnerer GeoJSON FeatureCollection med polygon-geometri.
+ * ejerlavskode og matrikelnr hentes direkte fra DAR-adresse-svaret
+ * (data.adgangsadresse.jordstykke) – ingen ekstra API-kald nødvendigt.
  */
-async function fetchJordstykkeGeoJSON(featureId, husnummerId) {
-  const tries = [];
+async function fetchJordstykkeGeoJSON(ejerlavskode, matrikelnr) {
+  if (!ejerlavskode || !matrikelnr) return null;
 
-  // Prøv husnummerId først – det er det mest pålidelige parameter
-  if (husnummerId) {
-    tries.push(`https://api.dataforsyningen.dk/jordstykker?husnummer=${encodeURIComponent(husnummerId)}&format=geojson`);
-  }
-  // Fallback: featureId (grundens lokalId)
-  if (featureId) {
-    tries.push(`https://api.dataforsyningen.dk/jordstykker?featureid=${encodeURIComponent(featureId)}&format=geojson`);
-  }
+  const url = `https://api.dataforsyningen.dk/jordstykker/${encodeURIComponent(ejerlavskode)}/${encodeURIComponent(matrikelnr)}?format=geojson`;
 
-  for (const url of tries) {
-    try {
-      const resp = await fetch(url);
-      if (!resp.ok) continue;
-      const data = await resp.json();
-      // Tjek om vi fik noget brugbart
-      if (data && data.features && data.features.length > 0) {
-        return data;
-      }
-      if (Array.isArray(data) && data.length > 0) {
-        return data;
-      }
-    } catch (e) {
-      console.warn("Fejl ved parsning af jordstykke-JSON fra", url, e);
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      console.warn("fetchJordstykkeGeoJSON: fejl", resp.status, url);
+      return null;
     }
+    const data = await resp.json();
+
+    // Svaret er et enkelt GeoJSON Feature (ikke FeatureCollection)
+    if (data && data.type === "Feature" && data.geometry) {
+      return data;
+    }
+    // Hvis det er en FeatureCollection, tag første feature
+    if (data && data.type === "FeatureCollection" && data.features && data.features.length > 0) {
+      return data.features[0];
+    }
+    return null;
+  } catch (e) {
+    console.warn("fetchJordstykkeGeoJSON: undtagelse", e);
+    return null;
   }
-  return null;
 }
 
 /**
@@ -2754,7 +2759,7 @@ function hideBBRInfo() {
  * Render BBR-info i infoboksen. Viser et antal bygninger og detaljer i <details>-elementer.
  * Hvis ingen data findes, vises en besked.
  */
-function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber) {
+function renderBBRInfo(bbrId, adresseId, fallbackLat, fallbackLon, bfeNumber, ejerlavskode, matrikelnr) {
     // Bagudkompatibilitet: gammel signatur var (bbrId, fallbackLat, fallbackLon, bfeNumber)
   if (arguments.length === 4) {
     bfeNumber = fallbackLon;
@@ -3056,11 +3061,8 @@ if (tekniskeOnly.length > 0) {
 `;
 
       // ----- BYGNINGER (som før) -----
-      // Tegn matrikelgrænser automatisk:
-      // Primær: via husnummerId (adgangsadresse-id, mest pålidelig)
-      // Fallback: via grund-id (lokalId fra BBR-bygningsdata)
-if (buildingsOnly && buildingsOnly.length > 0) {
-  // Stil med grøn kant og let fyld – nem at identificere på kortet
+      // Tegn matrikelgrænse automatisk via ejerlav+matrikelnr
+  // (bekræftet kæde: /jordstykker/{ejerlavskode}/{matrikelnr}?format=geojson)
   const matrikelStyle = {
     color: "#1a7a1a",
     weight: 2.5,
@@ -3069,36 +3071,26 @@ if (buildingsOnly && buildingsOnly.length > 0) {
     fillOpacity: 0.08
   };
 
-  // Primær: brug husnummerId (adgangsadresse-id) – mest pålidelig på tværs af hustyper
-  const husId = lastSelectedHusnummerIdForBBR || null;
-  if (husId) {
-    fetchJordstykkeGeoJSON(null, husId)
-      .then((geoData) => {
-        if (geoData && geoData.features && geoData.features.length > 0) {
-          L.geoJSON(geoData, { style: matrikelStyle }).addTo(bbrFootprintsLayer);
+  if (ejerlavskode && matrikelnr) {
+    fetchJordstykkeGeoJSON(ejerlavskode, matrikelnr)
+      .then((geoFeature) => {
+        if (geoFeature && geoFeature.geometry) {
+          bbrFootprintsLayer.clearLayers();
+          L.geoJSON(geoFeature, { style: matrikelStyle })
+            .bindTooltip(`Matrikel: ${matrikelnr}`, { sticky: true, direction: "top" })
+            .addTo(bbrFootprintsLayer);
           if (!map.hasLayer(bbrFootprintsLayer)) {
             bbrFootprintsLayer.addTo(map);
           }
+          console.log("Matrikel tegnet:", ejerlavskode, matrikelnr);
         } else {
-          // Fallback: grund-id'er fra bygningsdata
-          const grundIds = collectGrundIdsFromBuildings(buildingsOnly);
-          grundIds.forEach((gid) => {
-            fetchJordstykkeGeoJSON(gid, null)
-              .then((geoData2) => {
-                if (geoData2 && geoData2.features && geoData2.features.length > 0) {
-                  L.geoJSON(geoData2, { style: matrikelStyle }).addTo(bbrFootprintsLayer);
-                  if (!map.hasLayer(bbrFootprintsLayer)) {
-                    bbrFootprintsLayer.addTo(map);
-                  }
-                }
-              })
-              .catch((e) => console.warn("Matrikel fallback fejl for grund:", gid, e));
-          });
+          console.warn("Matrikel: intet svar for", ejerlavskode, matrikelnr);
         }
       })
-      .catch((e) => console.warn("Matrikel fejl for husnummer:", husId, e));
+      .catch((e) => console.warn("Matrikel fejl:", e));
+  } else {
+    console.warn("Matrikel: mangler ejerlavskode eller matrikelnr");
   }
-}
     
       buildingsOnly.forEach((b, idx) => {
         const building = (b && b.bygning) ? b.bygning : b;
