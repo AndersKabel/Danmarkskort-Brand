@@ -1173,13 +1173,25 @@ async function updateInfoBox(data, lat, lon, enhedsLabel) {
 
   // Byg grund-adresse (uden etage/dør) ud fra data
   if (data.adgangsadresse) {
-    // Typisk når data kommer fra /adresser eller /adgangsadresser
-    adresseStr = data.adgangsadresse.adressebetegnelse ||
-      `${data.adgangsadresse.vejnavn || ""} ${data.adgangsadresse.husnr || ""}, ${data.adgangsadresse.postnr || ""} ${data.adgangsadresse.postnrnavn || ""}`;
-    evaFormat   = `${data.adgangsadresse.vejnavn || ""},${data.adgangsadresse.husnr || ""},${data.adgangsadresse.postnr || ""}`;
-    notesFormat = `${data.adgangsadresse.vejnavn || ""} ${data.adgangsadresse.husnr || ""}, ${data.adgangsadresse.postnr || ""} ${data.adgangsadresse.postnrnavn || ""}`;
-    vejkode     = data.adgangsadresse.vejkode || "?";
-    kommunekode = data.adgangsadresse.kommunekode || "?";
+    const adgAdrRaw = data.adgangsadresse;
+
+    // DAR /adresser/{id} returnerer kommune/vejstykke/politikreds som objekter:
+    //   adgangsadresse.kommune.kode   og   adgangsadresse.vejstykke.kode
+    // Reverse-geocoding returnerer flade felter:
+    //   adgangsadresse.kommunekode    og   adgangsadresse.vejkode
+    // Vi håndterer begge strukturer.
+    const vejnavnRaw  = adgAdrRaw.vejstykke?.navn    || adgAdrRaw.vejnavn    || "";
+    const husnrRaw    = adgAdrRaw.husnr               || adgAdrRaw.husnummer  || "";
+    const postnrRaw   = adgAdrRaw.postnummer?.nr      || adgAdrRaw.postnr     || "";
+    const postnavnRaw = adgAdrRaw.postnummer?.navn    || adgAdrRaw.postnrnavn || "";
+
+    adresseStr = adgAdrRaw.adressebetegnelse ||
+      `${vejnavnRaw} ${husnrRaw}, ${postnrRaw} ${postnavnRaw}`;
+    evaFormat   = `${vejnavnRaw},${husnrRaw},${postnrRaw}`;
+    notesFormat = `${vejnavnRaw} ${husnrRaw}, ${postnrRaw} ${postnavnRaw}`;
+
+    vejkode     = adgAdrRaw.vejstykke?.kode  || adgAdrRaw.vejkode     || "?";
+    kommunekode = adgAdrRaw.kommune?.kode    || adgAdrRaw.kommunekode || "?";
   } else if (data.adressebetegnelse) {
     // Flad struktur fra fx reverse-kald
     adresseStr  = data.adressebetegnelse;
@@ -1322,10 +1334,16 @@ async function updateInfoBox(data, lat, lon, enhedsLabel) {
   }
 
   // ----- Politikreds-info (hvis tilgængelig) -----
-  const politikredsNavn = data.politikredsnavn
+  // DAR /adresser/{id}: adgangsadresse.politikreds.navn + .kode (objekt)
+  // Reverse geocoding: flade felter politikredsnavn + politikredskode
+  const politikredsNavn =
+    data.adgangsadresse?.politikreds?.navn
+    ?? data.politikredsnavn
     ?? data.adgangsadresse?.politikredsnavn
     ?? null;
-  const politikredsKode = data.politikredskode
+  const politikredsKode =
+    data.adgangsadresse?.politikreds?.kode
+    ?? data.politikredskode
     ?? data.adgangsadresse?.politikredskode
     ?? null;
   if (politikredsNavn || politikredsKode) {
