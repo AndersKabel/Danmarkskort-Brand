@@ -1360,10 +1360,16 @@ async function updateInfoBox(data, lat, lon, enhedsLabel) {
       const adresseIdForEnhed = (data && data.id) ? data.id : null;
 
       // Udtræk ejerlav+matrikelnr fra DAR-svaret til matrikelindtegning
-      // Struktur: data.adgangsadresse.jordstykke.ejerlav.kode + .matrikelnr
-      const jordstykke = data?.adgangsadresse?.jordstykke ?? null;
+      // DAR-struktur: data.adgangsadresse.jordstykke.ejerlav.kode + .matrikelnr
+      // Nogle svar har data.adgangsadresse som separat objekt, andre er fladet ud
+      const adgAdr = data?.adgangsadresse ?? data ?? null;
+      const jordstykke = adgAdr?.jordstykke ?? null;
       const ejerlavskode = jordstykke?.ejerlav?.kode ?? null;
-      const matrikelnr   = jordstykke?.matrikelnr ?? null;
+      const matrikelnr   = jordstykke?.matrikelnr
+                        ?? adgAdr?.matrikelnr
+                        ?? data?.matrikelnr
+                        ?? null;
+      console.log("Matrikel udtræk:", { ejerlavskode, matrikelnr, jordstykke });
 
       renderBBRInfo(bbrId, adresseIdForEnhed, lat, lon, bfeNumber, ejerlavskode, matrikelnr);
       // Hent brandposter i 500m radius automatisk
@@ -1535,8 +1541,52 @@ async function fetchBBRData(bbrId, bfeNumber) {
                 console.warn("fetchBBRData: bygning?id fejlede for UUID", uuid, e);
               }
             }
+
             if (buildings.length > 0) {
               console.log("fetchBBRData: fandt bygning(er) via enhed→UUID", buildings.length);
+
+              // Hent søskende-bygninger via grund-UUID fra hovedbygningen
+              // (garage, udhuse, annekser som ikke har egen enhed med adressen)
+              const grundUUIDs = new Set();
+              buildings.forEach(b => {
+                const obj = (b && b.bygning) ? b.bygning : b;
+                // grund er en liste af opgang-objekter der indeholder grundId
+                const grundId = obj?.grund
+                  ?? (Array.isArray(obj?.opgang) && obj.opgang[0]?.grund)
+                  ?? null;
+                if (grundId && typeof grundId === "string" && grundId.trim() !== "") {
+                  grundUUIDs.add(grundId.trim());
+                }
+              });
+
+              if (grundUUIDs.size > 0) {
+                for (const gUUID of grundUUIDs) {
+                  try {
+                    const sibResp = await fetch(
+                      `${BBR_PROXY}/bygning?grund=${encodeURIComponent(gUUID)}`,
+                      { method: "GET" }
+                    );
+                    if (!sibResp.ok) continue;
+                    const sibData = await sibResp.json();
+                    if (Array.isArray(sibData) && sibData.length > 0) {
+                      sibData.forEach(sib => {
+                        // Undgå dubletter
+                        const sibObj = (sib && sib.bygning) ? sib.bygning : sib;
+                        const sibId = sibObj?.id_lokalId ?? sibObj?.id ?? null;
+                        const exists = buildings.some(b => {
+                          const bObj = (b && b.bygning) ? b.bygning : b;
+                          return bObj?.id_lokalId === sibId || bObj?.id === sibId;
+                        });
+                        if (!exists) buildings.push(sib);
+                      });
+                    }
+                  } catch (e) {
+                    console.warn("fetchBBRData: søskende-bygning fejlede for grund", gUUID, e);
+                  }
+                }
+                console.log("fetchBBRData: total bygninger inkl. søskende", buildings.length);
+              }
+
               return buildings;
             }
           }
@@ -2324,25 +2374,61 @@ function asCodeString(value) {
 
 const BBR_TEKNISK_KLASSIFIKATION = {
   "54.15.05.05": "Tank",
+  "54.15.05.10": "Olieudskiller",
+  "54.15.05.15": "Brønd",
+  "54.15.05.20": "Silo",
+  "54.15.05.25": "Beholder",
   "TANK": "Tank"
 };
 
 const BBR_TEKNISK_STATUS = {
-  "6": "Afblændet"
+  "1": "Aktiv",
+  "2": "Midlertidigt ude af drift",
+  "3": "Permanent ude af drift",
+  "6": "Afblændet",
+  "7": "Sløjfet"
 };
 
 const BBR_TEKNISK_STOERRELSESKLASSE = {
-  "10": "Under 6.000 l"
+  "10": "Under 6.000 l",
+  "20": "6.000–100.000 l",
+  "30": "Over 100.000 l"
 };
 
+// BBR kodeliste for indhold i tekniske anlæg (tank-indhold)
 const BBR_TEKNISK_INDHOLD = {
-  "1001": "Mineralske olieprodukter"
+  "1": "Benzin",
+  "2": "Diesel",
+  "3": "Fyringsolie",
+  "4": "Petroleum",
+  "5": "Smøreolie",
+  "6": "Sprit/alkohol",
+  "7": "Kemikalier",
+  "8": "Flydende gas (LPG)",
+  "9": "Spildevand",
+  "10": "Olie",
+  "11": "Opløsningsmidler",
+  "20": "Spildevand",
+  "30": "Kemikalier",
+  "80": "Andet",
+  "1001": "Mineralske olieprodukter",
+  "1002": "Benzin",
+  "1003": "Diesel/gasolie",
+  "1004": "Fyringsolie",
+  "1005": "Smøreolie/hydraulikolie",
+  "1006": "Flydende gas (LPG)",
+  "1007": "Kemikalier",
+  "1008": "Spildevand",
+  "1009": "Andet farligt stof",
+  "1010": "Ikke farligt stof"
 };
 
 function describeCodeWithFallback(dict, value) {
   const code = asCodeString(value);
   if (!code) return null;
-  return dict[code] ? `${dict[code]} (${code})` : `Kode ${code}`;
+  // Vis kun den menneskelige tekst – uden kode-nummeret i parentes
+  // da koden ikke er meningsfuld for branddisponenten
+  return dict[code] ? dict[code] : `Kode ${code}`;
 }
 
 function resolveOverlappingMarkerLatLon(lat, lon, keyPrefix, usedCoordsMap) {
@@ -3020,6 +3106,22 @@ if (tekniskeOnly.length > 0) {
 
     const resolvedTechLatLon = resolveOverlappingMarkerLatLon(tLat, tLon, "tech", usedMarkerCoordsMap);
     const m = L.marker([resolvedTechLatLon[0], resolvedTechLatLon[1]], { icon: techIcon });
+
+    // Hover-tooltip – samme princip som bygningsmarkører
+    const tSummary = summarizeTekniskAnlaeg(t);
+    const tTooltipParts = [];
+    tTooltipParts.push(tSummary.title || "Teknisk anlæg");
+    const tStatusPair  = tSummary.pairs.find(p => p.label === "Status");
+    const tIndholdPair = tSummary.pairs.find(p => p.label === "Indhold");
+    const tStorPair    = tSummary.pairs.find(p => p.label === "Størrelsesklasse");
+    const tEtablPair   = tSummary.pairs.find(p => p.label === "Etableringsår");
+    if (tIndholdPair  && tIndholdPair.value)  tTooltipParts.push(tIndholdPair.value);
+    if (tStorPair     && tStorPair.value)      tTooltipParts.push(tStorPair.value);
+    if (tStatusPair   && tStatusPair.value)    tTooltipParts.push("Status: " + tStatusPair.value);
+    if (tEtablPair    && tEtablPair.value)     tTooltipParts.push("Etab.: " + tEtablPair.value);
+    const tTooltipHtml = "<strong>Teknisk anlæg " + (tIdx + 1) + "</strong><br>" +
+      tTooltipParts.map(function(p){ return "• " + p; }).join("<br>");
+    m.bindTooltip(tTooltipHtml, { permanent: false, direction: "top", offset: [0, -14], opacity: 0.95 });
 
     m.bindPopup(renderTekniskAnlaegPopupHtml(t, tIdx));
 
