@@ -27,7 +27,9 @@ const BBR_GRAPHQL_QUERY = `{
       byg021BygningensAnvendelse
       byg026Opfoerelsesaar
       byg033Tagdaekningsmateriale
+      byg035SupplerendeTagdaekningsMateriale
       byg036AsbestholdigtMateriale
+      byg037KildeTilBygningensMaterialer
       byg038SamletBygningsareal
       byg039BygningensSamledeBoligAreal
       byg041BebyggetAreal
@@ -3361,6 +3363,9 @@ if (tekniskeOnly.length > 0) {
         const bebyggetAreal = building["byg041BebyggetAreal"] ?? getBBRValue(building, "bebyggedeAreal", /bebygget.*areal/i);
 
         const asbestKode = building["byg036AsbestholdigtMateriale"] ?? null;
+        const supTagKode = building["byg035SupplerendeTagdaekningsMateriale"] ?? getBBRCode(building, "supplerendeTagdaekningsmateriale", /suppl.*tagd/i) ?? null;
+        const supTagTekst = supTagKode != null ? describeBBRCode(BBR_TAGDAEKNING, supTagKode) : null;
+        const kildeMaterialerKode = building["byg037KildeTilBygningensMaterialer"] ?? null;
         const opdateringDatoStr = building["datafordelerOpdateringstid"] || null;
         const revisionsDatoStr = building["byg094Revisionsdato"] || null;
         const opdateringDato = opdateringDatoStr ? String(opdateringDatoStr).split("T")[0] : null;
@@ -3406,6 +3411,11 @@ if (tekniskeOnly.length > 0) {
           detailsHtml += `<li><strong>Tagdækningsmateriale:</strong> ${tagTekst}</li>`;
         } else if (tagKode != null) {
           detailsHtml += `<li><strong>Tagdækningsmateriale:</strong> Kode ${tagKode}</li>`;
+        }
+        if (supTagTekst) {
+          detailsHtml += `<li><strong>Supplerende tagdækning:</strong> ${supTagTekst}</li>`;
+        } else if (supTagKode != null) {
+          detailsHtml += `<li><strong>Supplerende tagdækning:</strong> Kode ${supTagKode}</li>`;
         }
         if (ydervTekst) {
           detailsHtml += `<li><strong>Ydervægsmateriale:</strong> ${ydervTekst}</li>`;
