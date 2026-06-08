@@ -6,6 +6,119 @@ const VD_PROXY = "https://vd-proxy.anderskabel8.workers.dev";
 
 // Cloudflare proxy til BBR (bygning)
 const BBR_PROXY = "https://bbr-proxy.anderskabel8.workers.dev";
+
+// -----------------------------------------------------------------------
+// BBR GraphQL hjælper
+// Henter bygningsdata via GraphQL i stedet for REST.
+// Returnerer en liste af bygnings-objekter i samme struktur som REST,
+// så render-koden ikke behøver ændres.
+// -----------------------------------------------------------------------
+const BBR_GRAPHQL_QUERY = `{
+  BBR_Bygning(
+    first: 50
+    virkningstid: "VIRKNINGS_TID"
+    registreringstid: "VIRKNINGS_TID"
+    where: { FILTER }
+  ) {
+    nodes {
+      id_lokalId
+      status
+      byg007Bygningsnummer
+      byg021BygningensAnvendelse
+      byg026Opfoerelsesaar
+      byg033Tagdaekningsmateriale
+      byg036AsbestholdigtMateriale
+      byg038SamletBygningsareal
+      byg039BygningensSamledeBoligAreal
+      byg041BebyggetAreal
+      byg054AntalEtager
+      byg056Varmeinstallation
+      byg057Opvarmningsmiddel
+      byg058SupplerendeVarme
+      byg094Revisionsdato
+      datafordelerOpdateringstid
+      husnummer
+      grund
+      kommunekode
+    }
+  }
+}`;
+
+/**
+ * Normalisér et GraphQL BBR_Bygning-node til samme feltnavne som REST.
+ * Det sikrer at render-koden (der bruger de danske feltnavne) stadig virker.
+ */
+function normalizeBBRGraphQLNode(node) {
+  if (!node || typeof node !== "object") return node;
+  const n = { ...node };
+
+  // ASCII-navn → dansk navn (som render-koden forventer)
+  if (n["byg026Opfoerelsesaar"] != null) {
+    n["byg026Opførelesår"] = n["byg026Opfoerelsesaar"];
+  }
+  if (n["byg033Tagdaekningsmateriale"] != null) {
+    n["byg033Tagdækningsmateriale"] = n["byg033Tagdaekningsmateriale"];
+  }
+  // status → byg026Bygningsstatus (bruges af filterActiveBuildingsOnly)
+  if (n["status"] != null) {
+    n["byg026Bygningsstatus"] = n["status"];
+  }
+  return n;
+}
+
+/**
+ * Hent bygninger via BBR GraphQL.
+ * @param {string|null} bygningUUID  - direkte bygnings-UUID (fra enhed-opslag)
+ * @param {string|null} husnummerId  - husnummer-UUID (fra DAR)
+ * @returns {Array} liste af bygnings-objekter (normaliserede)
+ */
+async function fetchBBRGraphQL(bygningUUID, husnummerId) {
+  try {
+    const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+
+    let filter = null;
+    if (bygningUUID) {
+      filter = `id_lokalId: { eq: "${bygningUUID}" }`;
+    } else if (husnummerId) {
+      filter = `husnummer: { eq: "${husnummerId}" }`;
+    } else {
+      return [];
+    }
+
+    const query = BBR_GRAPHQL_QUERY
+      .replace(/VIRKNINGS_TID/g, now)
+      .replace("FILTER", filter);
+
+    const resp = await fetch(`${BBR_PROXY}/graphql`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query })
+    });
+
+    if (!resp.ok) {
+      console.warn("fetchBBRGraphQL: HTTP fejl", resp.status);
+      return [];
+    }
+
+    const data = await resp.json();
+
+    if (data.errors && data.errors.length > 0) {
+      console.warn("fetchBBRGraphQL: GraphQL fejl", data.errors[0].message);
+      return [];
+    }
+
+    const nodes = data?.data?.BBR_Bygning?.nodes;
+    if (!Array.isArray(nodes) || nodes.length === 0) {
+      return [];
+    }
+
+    return nodes.map(normalizeBBRGraphQLNode);
+  } catch (err) {
+    console.warn("fetchBBRGraphQL fejl:", err);
+    return [];
+  }
+}
+
 // Hjælper: hent BBR "grund" via Cloudflare BBR-proxyen
 async function fetchBBRGrund(paramsObj) {
   try {
@@ -1498,17 +1611,13 @@ function extractBfeNumberFromAdresse(data) {
 }
 
 /**
- * Hent BBR-data for en adresse (bygninger) via Cloudflare BBR-proxyen.
+ * Hent BBR-data for en adresse (bygninger).
  *
- * Bekræftet kæde (jun 2025):
- *   1) enhed?adresseIdentificerer=<adresseId>  → bygning-UUID i enhed.bygning
- *   2) bygning?id=<UUID>                        → fulde bygningsdata
+ * Primær vej (jun 2025): BBR GraphQL via proxy
+ *   1) enhed?adresseIdentificerer=<adresseId>  → bygning-UUID
+ *   2) fetchBBRGraphQL(UUID)                   → fulde bygningsdata inkl. søskende
  *
- * Virker for BÅDE almindelige adresser og etageejendomme/ejerlejligheder,
- * fordi BBR altid knytter en enhed til sin bygning via UUID.
- *
- * Eksisterende fallbacks (husnummer, bfenummer, DAR_BFE) bevares som
- * sikkerhedsnet i tilfælde af at enhed-opslaget ikke giver data.
+ * Fallback: REST via proxy (bevares som sikkerhedsnet)
  */
 async function fetchBBRData(bbrId, bfeNumber) {
   try {
@@ -1518,9 +1627,7 @@ async function fetchBBRData(bbrId, bfeNumber) {
     }
 
     // ----------------------------------------------------------------
-    // PRIMÆR VEJ: enhed → bygning-UUID → bygning
-    // Bruger lastSelectedAdresseIdForBBR (enheds-adresse-id, sat i
-    // renderBBRInfo) som nøgle til enhed-opslaget.
+    // PRIMÆR VEJ: enhed → bygning-UUID → GraphQL
     // ----------------------------------------------------------------
     try {
       const adrId = (lastSelectedAdresseIdForBBR != null && String(lastSelectedAdresseIdForBBR).trim() !== "")
@@ -1549,32 +1656,38 @@ async function fetchBBRData(bbrId, bfeNumber) {
           if (bygningUUIDs.size > 0) {
             const buildings = [];
             for (const uuid of bygningUUIDs) {
-              try {
-                const bygResp = await fetch(
-                  `${BBR_PROXY}/bygning?id=${encodeURIComponent(uuid)}`,
-                  { method: "GET" }
-                );
-                if (!bygResp.ok) continue;
-                const bygData = await bygResp.json();
-                if (Array.isArray(bygData) && bygData.length > 0) {
-                  buildings.push(...bygData);
-                } else if (bygData && typeof bygData === "object" && !Array.isArray(bygData)) {
-                  buildings.push(bygData);
+              // Hent bygning via GraphQL
+              const gqlBuildings = await fetchBBRGraphQL(uuid, null);
+              if (gqlBuildings.length > 0) {
+                buildings.push(...gqlBuildings);
+              } else {
+                // Fallback til REST for denne UUID
+                try {
+                  const bygResp = await fetch(
+                    `${BBR_PROXY}/bygning?id=${encodeURIComponent(uuid)}`,
+                    { method: "GET" }
+                  );
+                  if (bygResp.ok) {
+                    const bygData = await bygResp.json();
+                    if (Array.isArray(bygData) && bygData.length > 0) {
+                      buildings.push(...bygData);
+                    } else if (bygData && typeof bygData === "object" && !Array.isArray(bygData)) {
+                      buildings.push(bygData);
+                    }
+                  }
+                } catch (e) {
+                  console.warn("fetchBBRData: REST fallback fejlede for UUID", uuid, e);
                 }
-              } catch (e) {
-                console.warn("fetchBBRData: bygning?id fejlede for UUID", uuid, e);
               }
             }
 
             if (buildings.length > 0) {
-              console.log("fetchBBRData: fandt bygning(er) via enhed→UUID", buildings.length);
+              console.log("fetchBBRData: fandt bygning(er) via enhed→GraphQL", buildings.length);
 
-              // Hent søskende-bygninger via grund-UUID fra hovedbygningen
-              // (garage, udhuse, annekser som ikke har egen enhed med adressen)
+              // Hent søskende-bygninger via grund-UUID (garage, udhuse, annekser)
               const grundUUIDs = new Set();
               buildings.forEach(b => {
                 const obj = (b && b.bygning) ? b.bygning : b;
-                // grund er en liste af opgang-objekter der indeholder grundId
                 const grundId = obj?.grund
                   ?? (Array.isArray(obj?.opgang) && obj.opgang[0]?.grund)
                   ?? null;
@@ -1585,24 +1698,27 @@ async function fetchBBRData(bbrId, bfeNumber) {
 
               if (grundUUIDs.size > 0) {
                 for (const gUUID of grundUUIDs) {
+                  // Søskende via GraphQL (husnummer-filter)
+                  const sibBuildings = await fetchBBRGraphQL(null, null);
+                  // Søskende via REST bygning?grund (mest pålidelig for søskende)
                   try {
                     const sibResp = await fetch(
                       `${BBR_PROXY}/bygning?grund=${encodeURIComponent(gUUID)}`,
                       { method: "GET" }
                     );
-                    if (!sibResp.ok) continue;
-                    const sibData = await sibResp.json();
-                    if (Array.isArray(sibData) && sibData.length > 0) {
-                      sibData.forEach(sib => {
-                        // Undgå dubletter
-                        const sibObj = (sib && sib.bygning) ? sib.bygning : sib;
-                        const sibId = sibObj?.id_lokalId ?? sibObj?.id ?? null;
-                        const exists = buildings.some(b => {
-                          const bObj = (b && b.bygning) ? b.bygning : b;
-                          return bObj?.id_lokalId === sibId || bObj?.id === sibId;
+                    if (sibResp.ok) {
+                      const sibData = await sibResp.json();
+                      if (Array.isArray(sibData) && sibData.length > 0) {
+                        sibData.forEach(sib => {
+                          const sibObj = (sib && sib.bygning) ? sib.bygning : sib;
+                          const sibId = sibObj?.id_lokalId ?? sibObj?.id ?? null;
+                          const exists = buildings.some(b => {
+                            const bObj = (b && b.bygning) ? b.bygning : b;
+                            return bObj?.id_lokalId === sibId || bObj?.id === sibId;
+                          });
+                          if (!exists) buildings.push(sib);
                         });
-                        if (!exists) buildings.push(sib);
-                      });
+                      }
                     }
                   } catch (e) {
                     console.warn("fetchBBRData: søskende-bygning fejlede for grund", gUUID, e);
@@ -1617,7 +1733,7 @@ async function fetchBBRData(bbrId, bfeNumber) {
         }
       }
     } catch (e) {
-      console.warn("fetchBBRData: enhed→UUID-kæde fejlede, forsøger fallbacks", e);
+      console.warn("fetchBBRData: GraphQL-kæde fejlede, forsøger REST fallbacks", e);
     }
 
     // ----------------------------------------------------------------
@@ -3244,6 +3360,7 @@ if (tekniskeOnly.length > 0) {
         const boligAreal = building["byg039BygningensSamledeBoligAreal"] ?? getBBRValue(building, "boligareal", /samlede.*bolig.*areal/i);
         const bebyggetAreal = building["byg041BebyggetAreal"] ?? getBBRValue(building, "bebyggedeAreal", /bebygget.*areal/i);
 
+        const asbestKode = building["byg036AsbestholdigtMateriale"] ?? null;
         const opdateringDatoStr = building["datafordelerOpdateringstid"] || null;
         const revisionsDatoStr = building["byg094Revisionsdato"] || null;
         const opdateringDato = opdateringDatoStr ? String(opdateringDatoStr).split("T")[0] : null;
@@ -3294,6 +3411,9 @@ if (tekniskeOnly.length > 0) {
           detailsHtml += `<li><strong>Ydervægsmateriale:</strong> ${ydervTekst}</li>`;
         } else if (ydervKode != null) {
           detailsHtml += `<li><strong>Ydervægsmateriale:</strong> Kode ${ydervKode}</li>`;
+        }
+        if (asbestKode != null && String(asbestKode).trim() !== "" && String(asbestKode).trim() !== "0") {
+          detailsHtml += `<li><strong style="color:#c0392b">⚠ Asbest konstateret:</strong> Kode ${asbestKode}</li>`;
         }
         if (varmeTekst) {
           detailsHtml += `<li><strong>Varmeinstallation:</strong> ${varmeTekst}</li>`;
