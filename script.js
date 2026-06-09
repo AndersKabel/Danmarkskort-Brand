@@ -2768,6 +2768,65 @@ function parseWKTGeometryLatLon(wkt) {
 }
 
 /**
+ * Hent alle jordstykker tilknyttet en BBR-grund og tegn dem alle.
+ * Bruger BBR Grund-objektets jordstykke-liste til at finde ejerlavskode+matrikelnr
+ * for hvert jordstykke, og henter GeoJSON for dem alle fra Dataforsyningen.
+ *
+ * @param {string} grundUUID  - BBR Grund UUID (fra bygning.grund)
+ * @param {string} fallbackEjerlavskode - fra DAR (bruges hvis Grund-opslag fejler)
+ * @param {string} fallbackMatrikelnr   - fra DAR (bruges hvis Grund-opslag fejler)
+ * @returns {Array<{ejerlavskode, matrikelnr, geoFeature}>}
+ */
+async function fetchAlleJordstykkerForGrund(grundUUID, fallbackEjerlavskode, fallbackMatrikelnr) {
+  const resultater = [];
+
+  if (grundUUID) {
+    try {
+      const grundData = await fetchBBRGrund({ id: grundUUID });
+      const grundListe = Array.isArray(grundData) ? grundData : (grundData ? [grundData] : []);
+
+      // Udtræk alle jordstykker fra Grund-objektet
+      const jordstykker = [];
+      grundListe.forEach(g => {
+        const obj = g?.grund ?? g;
+        const js = obj?.jordstykke;
+        if (Array.isArray(js)) {
+          js.forEach(j => {
+            const ekode = j?.ejerlavskode ?? j?.ejerlav?.kode ?? null;
+            const mnr   = j?.matrikelnr ?? null;
+            if (ekode && mnr) jordstykker.push({ ejerlavskode: String(ekode), matrikelnr: String(mnr) });
+          });
+        } else if (js && typeof js === "object") {
+          const ekode = js?.ejerlavskode ?? js?.ejerlav?.kode ?? null;
+          const mnr   = js?.matrikelnr ?? null;
+          if (ekode && mnr) jordstykker.push({ ejerlavskode: String(ekode), matrikelnr: String(mnr) });
+        }
+      });
+
+      if (jordstykker.length > 0) {
+        console.log("fetchAlleJordstykkerForGrund: fandt", jordstykker.length, "jordstykke(r) via Grund");
+        for (const j of jordstykker) {
+          const geo = await fetchJordstykkeGeoJSON(j.ejerlavskode, j.matrikelnr);
+          if (geo) resultater.push({ ...j, geoFeature: geo });
+        }
+        return resultater;
+      }
+    } catch (e) {
+      console.warn("fetchAlleJordstykkerForGrund: Grund-opslag fejlede:", e);
+    }
+  }
+
+  // Fallback: tegn kun det primære jordstykke fra DAR
+  if (fallbackEjerlavskode && fallbackMatrikelnr) {
+    console.log("fetchAlleJordstykkerForGrund: bruger DAR-fallback");
+    const geo = await fetchJordstykkeGeoJSON(fallbackEjerlavskode, fallbackMatrikelnr);
+    if (geo) resultater.push({ ejerlavskode: fallbackEjerlavskode, matrikelnr: fallbackMatrikelnr, geoFeature: geo });
+  }
+
+  return resultater;
+}
+
+/**
  * Hent matrikelgrænse (jordstykke) som GeoJSON fra Dataforsyningen.
  *
  * Bekræftet kæde (jun 2025):
@@ -3318,25 +3377,37 @@ if (tekniskeOnly.length > 0) {
     fillOpacity: 0.08
   };
 
-  if (ejerlavskode && matrikelnr) {
-    fetchJordstykkeGeoJSON(ejerlavskode, matrikelnr)
-      .then((geoFeature) => {
-        if (geoFeature && geoFeature.geometry) {
-          bbrFootprintsLayer.clearLayers();
-          L.geoJSON(geoFeature, { style: matrikelStyle })
-            .bindTooltip(`Matrikel: ${matrikelnr}`, { sticky: true, direction: "top" })
-            .addTo(bbrFootprintsLayer);
-          if (!map.hasLayer(bbrFootprintsLayer)) {
-            bbrFootprintsLayer.addTo(map);
-          }
-          console.log("Matrikel tegnet:", ejerlavskode, matrikelnr);
-        } else {
-          console.warn("Matrikel: intet svar for", ejerlavskode, matrikelnr);
+  // Hent grund-UUID fra den første bygning (hvis vi har den fra GraphQL)
+  const grundUUIDForMatrikel = (() => {
+    if (!Array.isArray(buildingsOnly) || buildingsOnly.length === 0) return null;
+    const firstB = buildingsOnly[0];
+    const obj = (firstB && firstB.bygning) ? firstB.bygning : firstB;
+    return obj?.grund ?? null;
+  })();
+
+  if (ejerlavskode || grundUUIDForMatrikel) {
+    fetchAlleJordstykkerForGrund(grundUUIDForMatrikel, ejerlavskode, matrikelnr)
+      .then((jordstykker) => {
+        if (jordstykker.length === 0) {
+          console.warn("Matrikel: ingen jordstykker fundet");
+          return;
         }
+        bbrFootprintsLayer.clearLayers();
+        jordstykker.forEach(({ matrikelnr: mnr, geoFeature }) => {
+          if (geoFeature && geoFeature.geometry) {
+            L.geoJSON(geoFeature, { style: matrikelStyle })
+              .bindTooltip(`Matrikel: ${mnr}`, { sticky: true, direction: "top" })
+              .addTo(bbrFootprintsLayer);
+          }
+        });
+        if (!map.hasLayer(bbrFootprintsLayer)) {
+          bbrFootprintsLayer.addTo(map);
+        }
+        console.log("Matrikel tegnet:", jordstykker.length, "jordstykke(r)");
       })
       .catch((e) => console.warn("Matrikel fejl:", e));
   } else {
-    console.warn("Matrikel: mangler ejerlavskode eller matrikelnr");
+    console.warn("Matrikel: mangler både ejerlavskode og grundUUID");
   }
     
       buildingsOnly.forEach((b, idx) => {
