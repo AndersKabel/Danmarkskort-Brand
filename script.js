@@ -3394,8 +3394,10 @@ if (tekniskeOnly.length > 0) {
 
   // Hent BFE-nummer til matrikel-opslag (BFE giver alle jordstykker på ejendommen)
   // bfeNumber er sat i renderBBRInfo-kaldet fra adressesøgningen
-  if (ejerlavskode || bfeNumber) {
-    fetchAlleJordstykkerForGrund(bfeNumber, ejerlavskode, matrikelnr)
+  // Brug bfeCombined hvis det originale bfeNumber mangler
+  const bfeForMatrikel = bfeNumber ?? (Array.isArray(bfeCombined) && bfeCombined.length > 0 ? bfeCombined[0] : null);
+  if (ejerlavskode || bfeForMatrikel) {
+    fetchAlleJordstykkerForGrund(bfeForMatrikel, ejerlavskode, matrikelnr)
       .then((jordstykker) => {
         if (jordstykker.length === 0) {
           console.warn("Matrikel: ingen jordstykker fundet");
