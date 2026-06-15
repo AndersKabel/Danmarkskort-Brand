@@ -3030,7 +3030,15 @@ function hideBBRInfo() {
     }
   }
 
-  // Ryd også brandposter og matrikellag når BBR lukkes
+  // Ryd matrikellag
+  if (bbrFootprintsLayer) {
+    bbrFootprintsLayer.clearLayers();
+    if (map.hasLayer(bbrFootprintsLayer)) {
+      map.removeLayer(bbrFootprintsLayer);
+    }
+  }
+
+  // Ryd brandposter
   if (typeof hydrantLayer !== "undefined" && hydrantLayer) {
     hydrantLayer.clearLayers();
     if (map.hasLayer(hydrantLayer)) {
@@ -3038,12 +3046,6 @@ function hideBBRInfo() {
     }
   }
 }
-    if (bbrFootprintsLayer) {
-      bbrFootprintsLayer.clearLayers();
-      if (map.hasLayer(bbrFootprintsLayer)) {
-        map.removeLayer(bbrFootprintsLayer);
-      }
-    }
 
 /**
  * Render BBR-info i infoboksen. Viser et antal bygninger og detaljer i <details>-elementer.
