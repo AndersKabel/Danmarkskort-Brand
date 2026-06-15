@@ -2777,46 +2777,59 @@ function parseWKTGeometryLatLon(wkt) {
  * @param {string} fallbackMatrikelnr   - fra DAR (bruges hvis Grund-opslag fejler)
  * @returns {Array<{ejerlavskode, matrikelnr, geoFeature}>}
  */
-async function fetchAlleJordstykkerForGrund(grundUUID, fallbackEjerlavskode, fallbackMatrikelnr) {
+/**
+ * Hent alle jordstykker på en ejendom og returnér GeoJSON for dem alle.
+ *
+ * Strategi (i prioriteret rækkefølge):
+ * 1) BFE-nummer → Dataforsyningen /jordstykker?sfeejendomsnummer=<bfe>
+ *    Giver alle jordstykker på ejendommen direkte med ejerlavskode+matrikelnr.
+ * 2) Fallback: DAR-jordstykket (ejerlavskode+matrikelnr fra adresseopslaget)
+ *
+ * @param {string|null} bfeNumber           - BFE-nummer (fra fetchBfeNumber eller renderBBRInfo)
+ * @param {string|null} fallbackEjerlavskode - fra DAR
+ * @param {string|null} fallbackMatrikelnr   - fra DAR
+ */
+async function fetchAlleJordstykkerForGrund(bfeNumber, fallbackEjerlavskode, fallbackMatrikelnr) {
   const resultater = [];
 
-  if (grundUUID) {
+  // Strategi 1: BFE-nummer → alle jordstykker på ejendommen
+  if (bfeNumber) {
     try {
-      const grundData = await fetchBBRGrund({ id: grundUUID });
-      const grundListe = Array.isArray(grundData) ? grundData : (grundData ? [grundData] : []);
+      const url = `${BBR_PROXY}/jordstykker?sfeejendomsnummer=${encodeURIComponent(bfeNumber)}`;
+      const resp = await fetch(url);
+      if (resp.ok) {
+        const data = await resp.json();
+        const features = Array.isArray(data)
+          ? data
+          : (data?.type === "FeatureCollection" ? data.features : []);
 
-      // Udtræk alle jordstykker fra Grund-objektet
-      const jordstykker = [];
-      grundListe.forEach(g => {
-        const obj = g?.grund ?? g;
-        const js = obj?.jordstykke;
-        if (Array.isArray(js)) {
-          js.forEach(j => {
-            const ekode = j?.ejerlavskode ?? j?.ejerlav?.kode ?? null;
-            const mnr   = j?.matrikelnr ?? null;
-            if (ekode && mnr) jordstykker.push({ ejerlavskode: String(ekode), matrikelnr: String(mnr) });
-          });
-        } else if (js && typeof js === "object") {
-          const ekode = js?.ejerlavskode ?? js?.ejerlav?.kode ?? null;
-          const mnr   = js?.matrikelnr ?? null;
-          if (ekode && mnr) jordstykker.push({ ejerlavskode: String(ekode), matrikelnr: String(mnr) });
-        }
-      });
+        const jordstykker = [];
+        features.forEach(f => {
+          const props = f?.properties ?? f;
+          const ekode = props?.ejerlavskode ?? props?.ejerlav?.kode ?? null;
+          const mnr   = props?.matrikelnr ?? null;
+          if (ekode && mnr) jordstykker.push({ ejerlavskode: String(ekode), matrikelnr: String(mnr), geoFeature: f?.geometry ? f : null });
+        });
 
-      if (jordstykker.length > 0) {
-        console.log("fetchAlleJordstykkerForGrund: fandt", jordstykker.length, "jordstykke(r) via Grund");
-        for (const j of jordstykker) {
-          const geo = await fetchJordstykkeGeoJSON(j.ejerlavskode, j.matrikelnr);
-          if (geo) resultater.push({ ...j, geoFeature: geo });
+        if (jordstykker.length > 0) {
+          console.log("fetchAlleJordstykkerForGrund: fandt", jordstykker.length, "jordstykke(r) via BFE", bfeNumber);
+          for (const j of jordstykker) {
+            if (j.geoFeature) {
+              resultater.push(j);
+            } else {
+              const geo = await fetchJordstykkeGeoJSON(j.ejerlavskode, j.matrikelnr);
+              if (geo) resultater.push({ ...j, geoFeature: geo });
+            }
+          }
+          return resultater;
         }
-        return resultater;
       }
     } catch (e) {
-      console.warn("fetchAlleJordstykkerForGrund: Grund-opslag fejlede:", e);
+      console.warn("fetchAlleJordstykkerForGrund: BFE-opslag fejlede:", e);
     }
   }
 
-  // Fallback: tegn kun det primære jordstykke fra DAR
+  // Strategi 2: Fallback — primært jordstykke fra DAR
   if (fallbackEjerlavskode && fallbackMatrikelnr) {
     console.log("fetchAlleJordstykkerForGrund: bruger DAR-fallback");
     const geo = await fetchJordstykkeGeoJSON(fallbackEjerlavskode, fallbackMatrikelnr);
@@ -3379,16 +3392,10 @@ if (tekniskeOnly.length > 0) {
     fillOpacity: 0.08
   };
 
-  // Hent grund-UUID fra den første bygning (hvis vi har den fra GraphQL)
-  const grundUUIDForMatrikel = (() => {
-    if (!Array.isArray(buildingsOnly) || buildingsOnly.length === 0) return null;
-    const firstB = buildingsOnly[0];
-    const obj = (firstB && firstB.bygning) ? firstB.bygning : firstB;
-    return obj?.grund ?? null;
-  })();
-
-  if (ejerlavskode || grundUUIDForMatrikel) {
-    fetchAlleJordstykkerForGrund(grundUUIDForMatrikel, ejerlavskode, matrikelnr)
+  // Hent BFE-nummer til matrikel-opslag (BFE giver alle jordstykker på ejendommen)
+  // bfeNumber er sat i renderBBRInfo-kaldet fra adressesøgningen
+  if (ejerlavskode || bfeNumber) {
+    fetchAlleJordstykkerForGrund(bfeNumber, ejerlavskode, matrikelnr)
       .then((jordstykker) => {
         if (jordstykker.length === 0) {
           console.warn("Matrikel: ingen jordstykker fundet");
