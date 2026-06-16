@@ -1102,6 +1102,12 @@ map.on('overlayadd', function(e) {
       }
       keepMarkersLayer.addLayer(currentMarker);
     }
+  } else if (e.layer === hydrantLayer) {
+    // Når brandposter-laget tændes: hent brandposter fra aktuel markørposition
+    const center = currentMarker
+      ? currentMarker.getLatLng()
+      : map.getCenter();
+    fetchAndShowHydrants(center.lat, center.lng, 500);
   }
 });
 
