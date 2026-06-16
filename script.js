@@ -2780,60 +2780,95 @@ function parseWKTGeometryLatLon(wkt) {
 /**
  * Hent alle jordstykker på en ejendom og returnér GeoJSON for dem alle.
  *
- * Strategi (i prioriteret rækkefølge):
- * 1) BFE-nummer → Dataforsyningen /jordstykker?sfeejendomsnummer=<bfe>
- *    Giver alle jordstykker på ejendommen direkte med ejerlavskode+matrikelnr.
- * 2) Fallback: DAR-jordstykket (ejerlavskode+matrikelnr fra adresseopslaget)
+ * Bruger samme kæde som BBR's egen hjemmeside:
+ *   1) grund?bfenummer=<bfe> → jordstykkeList: ["1953901", ...]
+ *   2) /jordstykker?featureid=<id>&format=geojson → GeoJSON per jordstykke
  *
- * @param {string|null} bfeNumber           - BFE-nummer (fra fetchBfeNumber eller renderBBRInfo)
+ * Fallback: DAR-jordstykket (ejerlavskode+matrikelnr fra adresseopslaget)
+ *
+ * @param {string|null} bfeNumber            - BFE-nummer
  * @param {string|null} fallbackEjerlavskode - fra DAR
  * @param {string|null} fallbackMatrikelnr   - fra DAR
  */
 async function fetchAlleJordstykkerForGrund(bfeNumber, fallbackEjerlavskode, fallbackMatrikelnr) {
   const resultater = [];
 
-  // Strategi 1: BFE-nummer → alle jordstykker på ejendommen
+  // Strategi 1: BFE → Grund → jordstykkeList → GeoJSON per featureid
   if (bfeNumber) {
     try {
-      const url = `${BBR_PROXY}/jordstykker?sfeejendomsnummer=${encodeURIComponent(bfeNumber)}`;
-      const resp = await fetch(url);
-      if (resp.ok) {
-        const data = await resp.json();
-        const features = Array.isArray(data)
-          ? data
-          : (data?.type === "FeatureCollection" ? data.features : []);
+      // Hent alle grunde på ejendommen via BFE
+      const grundResp = await fetch(`${BBR_PROXY}/grund?bfenummer=${encodeURIComponent(bfeNumber)}`);
+      if (grundResp.ok) {
+        const grundData = await grundResp.json();
+        const grundListe = Array.isArray(grundData) ? grundData : (grundData ? [grundData] : []);
 
-        const jordstykker = [];
-        features.forEach(f => {
-          const props = f?.properties ?? f;
-          const ekode = props?.ejerlavskode ?? props?.ejerlav?.kode ?? null;
-          const mnr   = props?.matrikelnr ?? null;
-          if (ekode && mnr) jordstykker.push({ ejerlavskode: String(ekode), matrikelnr: String(mnr), geoFeature: f?.geometry ? f : null });
+        // Saml alle jordstykke-ID'er fra alle grunde
+        const jordstykkeIds = new Set();
+        grundListe.forEach(g => {
+          const obj = g?.grund ?? g;
+          const jsList = obj?.jordstykkeList ?? obj?.jordstykke ?? [];
+          const ids = Array.isArray(jsList) ? jsList : [jsList];
+          ids.forEach(id => {
+            if (id && String(id).trim() !== "") jordstykkeIds.add(String(id).trim());
+          });
         });
 
-        if (jordstykker.length > 0) {
-          console.log("fetchAlleJordstykkerForGrund: fandt", jordstykker.length, "jordstykke(r) via BFE", bfeNumber);
-          for (const j of jordstykker) {
-            if (j.geoFeature) {
-              resultater.push(j);
-            } else {
-              const geo = await fetchJordstykkeGeoJSON(j.ejerlavskode, j.matrikelnr);
-              if (geo) resultater.push({ ...j, geoFeature: geo });
+        if (jordstykkeIds.size > 0) {
+          console.log("fetchAlleJordstykkerForGrund: fandt", jordstykkeIds.size, "jordstykke-ID(er) via BFE", bfeNumber);
+
+          // Hent GeoJSON for hvert jordstykke via featureid
+          for (const id of jordstykkeIds) {
+            try {
+              const geoResp = await fetch(
+                `${BBR_PROXY}/jordstykker?featureid=${encodeURIComponent(id)}&format=geojson`
+              );
+              if (!geoResp.ok) continue;
+              const geoData = await geoResp.json();
+
+              // Kan returnere FeatureCollection eller enkelt Feature
+              const features = geoData?.type === "FeatureCollection"
+                ? geoData.features
+                : (geoData?.type === "Feature" ? [geoData] : []);
+
+              features.forEach(f => {
+                if (f?.geometry) {
+                  const props = f.properties ?? {};
+                  const mnr = props?.matrikelnr ?? id;
+                  resultater.push({ matrikelnr: mnr, geoFeature: f });
+                }
+              });
+
+              // Kan også returnere array
+              if (Array.isArray(geoData)) {
+                geoData.forEach(f => {
+                  if (f?.geometry) {
+                    const props = f.properties ?? {};
+                    const mnr = props?.matrikelnr ?? id;
+                    resultater.push({ matrikelnr: mnr, geoFeature: f });
+                  }
+                });
+              }
+            } catch (e) {
+              console.warn("fetchAlleJordstykkerForGrund: featureid", id, "fejlede:", e);
             }
           }
-          return resultater;
+
+          if (resultater.length > 0) {
+            console.log("fetchAlleJordstykkerForGrund: tegner", resultater.length, "jordstykke(r)");
+            return resultater;
+          }
         }
       }
     } catch (e) {
-      console.warn("fetchAlleJordstykkerForGrund: BFE-opslag fejlede:", e);
+      console.warn("fetchAlleJordstykkerForGrund: BFE/Grund-kæde fejlede:", e);
     }
   }
 
-  // Strategi 2: Fallback — primært jordstykke fra DAR
+  // Fallback: primært jordstykke fra DAR
   if (fallbackEjerlavskode && fallbackMatrikelnr) {
     console.log("fetchAlleJordstykkerForGrund: bruger DAR-fallback");
     const geo = await fetchJordstykkeGeoJSON(fallbackEjerlavskode, fallbackMatrikelnr);
-    if (geo) resultater.push({ ejerlavskode: fallbackEjerlavskode, matrikelnr: fallbackMatrikelnr, geoFeature: geo });
+    if (geo) resultater.push({ matrikelnr: fallbackMatrikelnr, geoFeature: geo });
   }
 
   return resultater;
