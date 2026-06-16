@@ -2756,48 +2756,47 @@ function summarizeEnhed(e) {
   const obj = (e && e.enhed) ? e.enhed : e;
 
   const anvKode  = obj["enh020EnhedensAnvendelse"] ?? null;
-  const anvTekst = anvKode != null ? (BBR_ENHED_ANVENDELSE[parseInt(anvKode)] ?? \`Kode \${anvKode}\`) : null;
+  const anvTekst = anvKode != null ? (BBR_ENHED_ANVENDELSE[parseInt(anvKode)] || "Kode " + anvKode) : null;
 
   const boligtypeKode  = obj["enh023Boligtype"] ?? null;
-  const boligtypeTekst = boligtypeKode != null ? (BBR_BOLIGTYPE[parseInt(boligtypeKode)] ?? \`Kode \${boligtypeKode}\`) : null;
+  const boligtypeTekst = boligtypeKode != null ? (BBR_BOLIGTYPE[parseInt(boligtypeKode)] || "Kode " + boligtypeKode) : null;
 
-  const areal         = obj["enh026EnhedensSamledeAreal"] ?? obj["enh027ArealTilBeboelse"] ?? null;
-  const boligareal    = obj["enh027ArealTilBeboelse"] ?? null;
-  const altanAreal    = obj["enh070\u00c5benAltanTagterrasseAreal"] ?? obj["enh070AabenAltanTagterrasseAreal"] ?? null;
-  const antalVaerelser = obj["enh031AntalV\u00e6relser"] ?? obj["enh031AntalVaerelser"] ?? null;
+  const areal          = obj["enh026EnhedensSamledeAreal"] ?? obj["enh027ArealTilBeboelse"] ?? null;
+  const boligareal     = obj["enh027ArealTilBeboelse"] ?? null;
+  const altanAreal     = obj["enh070ÅbenAltanTagterrasseAreal"] ?? obj["enh070AabenAltanTagterrasseAreal"] ?? null;
+  const antalVaerelser = obj["enh031AntalVærelser"] ?? obj["enh031AntalVaerelser"] ?? null;
   const antalToiletter = obj["enh065AntalVandskylledeToiletter"] ?? null;
-  const antalBadevaer  = obj["enh066AntalBadevaerelser"] ?? obj["enh066AntalBadev\u00e6relser"] ?? null;
+  const antalBadevaer  = obj["enh066AntalBadevaerelser"] ?? obj["enh066AntalBadeværelser"] ?? null;
 
   const energiKode  = obj["enh035Energiforsyning"] ?? null;
-  const energiTekst = energiKode != null ? (BBR_ENERGIFORSYNING[parseInt(energiKode)] ?? \`Kode \${energiKode}\`) : null;
+  const energiTekst = energiKode != null ? (BBR_ENERGIFORSYNING[parseInt(energiKode)] || "Kode " + energiKode) : null;
 
   const toiletKode  = obj["enh032Toiletforhold"] ?? null;
-  const toiletTekst = toiletKode != null ? (BBR_TOILET[toiletKode] ?? \`Kode \${toiletKode}\`) : null;
+  const toiletTekst = toiletKode != null ? (BBR_TOILET[toiletKode] || "Kode " + toiletKode) : null;
 
   const badeKode  = obj["enh033Badeforhold"] ?? null;
-  const badeTekst = badeKode != null ? (BBR_BADE[badeKode] ?? \`Kode \${badeKode}\`) : null;
+  const badeTekst = badeKode != null ? (BBR_BADE[badeKode] || "Kode " + badeKode) : null;
 
-  const kokkenKode  = obj["enh034K\u00f8kkenforhold"] ?? obj["enh034Kokkenforhold"] ?? null;
-  const kokkenTekst = kokkenKode != null ? (BBR_KOKKEN[kokkenKode] ?? \`Kode \${kokkenKode}\`) : null;
+  const kokkenKode  = obj["enh034Køkkenforhold"] ?? obj["enh034Kokkenforhold"] ?? null;
+  const kokkenTekst = kokkenKode != null ? (BBR_KOKKEN[kokkenKode] || "Kode " + kokkenKode) : null;
 
-  // Opgang-UUID — ikke direkte visningsværdi, men nyttigt
   const opgang = obj["opgang"] ?? null;
 
   return [
-    { label: "Anvendelse",            value: anvTekst },
-    { label: "Boligtype",             value: boligtypeTekst },
-    { label: "Samlet areal",          value: areal != null ? \`\${areal} m²\` : null },
-    { label: "Boligareal",            value: boligareal != null ? \`\${boligareal} m²\` : null },
-    { label: "Altan/tagterasse",      value: altanAreal != null ? \`\${altanAreal} m²\` : null },
-    { label: "Antal værelser",        value: antalVaerelser },
-    { label: "Vandsk. toiletter",     value: antalToiletter },
-    { label: "Badeværelser",          value: antalBadevaer },
-    { label: "Energiforsyning",       value: energiTekst },
-    { label: "Toiletforhold",         value: toiletTekst },
-    { label: "Badeforhold",           value: badeTekst },
-    { label: "Køkkenforhold",         value: kokkenTekst },
-    { label: "Opgang-ID",             value: opgang },
-  ].filter(p => p.value != null && String(p.value).trim() !== "");
+    { label: "Anvendelse",        value: anvTekst },
+    { label: "Boligtype",         value: boligtypeTekst },
+    { label: "Samlet areal",      value: areal != null ? (areal + " m²") : null },
+    { label: "Boligareal",        value: boligareal != null ? (boligareal + " m²") : null },
+    { label: "Altan/tagterasse",  value: altanAreal != null ? (altanAreal + " m²") : null },
+    { label: "Antal værelser",      value: antalVaerelser },
+    { label: "Vandsk. toiletter", value: antalToiletter },
+    { label: "Badeværelser",        value: antalBadevaer },
+    { label: "Energiforsyning",   value: energiTekst },
+    { label: "Toiletforhold",     value: toiletTekst },
+    { label: "Badeforhold",       value: badeTekst },
+    { label: "Køkkenforhold",       value: kokkenTekst },
+    { label: "Opgang-ID",         value: opgang },
+  ].filter(function(p) { return p.value != null && String(p.value).trim() !== ""; });
 }
 
 function summarizeEjendomsrelation(er) {
