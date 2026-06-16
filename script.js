@@ -2514,6 +2514,74 @@ function asCodeString(value) {
   return s || null;
 }
 
+const BBR_ENHED_ANVENDELSE = {
+  1: "Stuehus til landbrugsejendom",
+  2: "Fritliggende enfamiliehus",
+  3: "Rækkehus, kædehus mv.",
+  4: "Rækkehus, kædehus mv.",
+  5: "Etagebolig, flerfamiliehus",
+  6: "Etagebolig, flerfamiliehus",
+  110: "Stuehus til landbrugsejendom",
+  120: "Fritliggende enfamiliehus",
+  121: "Sammenbygget enfamiliehus",
+  122: "Fritliggende enfamiliehus, anneks",
+  130: "Række-, kæde- eller dobbelthus",
+  131: "Række-, kæde- eller dobbelthus",
+  132: "Dobbelthus",
+  140: "Etagebolig, flerfamilie- eller tofamiliehus",
+  150: "Kollegium",
+  160: "Døgninstitution",
+  185: "Anneks til bolig",
+  190: "Anden helårsbeboelse",
+  510: "Sommerhus",
+  585: "Anneks til sommerhus",
+  590: "Anden fritidsbolig",
+};
+
+const BBR_BOLIGTYPE = {
+  1: "Selvstændig lejlighed",
+  2: "Værelse",
+  3: "Enkeltværelse",
+  4: "Dobbeltkammer",
+  5: "Beboelsesrum",
+};
+
+const BBR_ENERGIFORSYNING = {
+  1: "Bygas",
+  2: "Naturgas/Biogas",
+  3: "Fjernvarme",
+  4: "Elektricitet",
+  5: "Olie",
+  6: "Fast brændsel",
+  7: "Solvarme",
+  8: "Anden vedvarende energi",
+  9: "Ingen varmeinstallation",
+  10: "Varmepumpe",
+  11: "Kombineret solvarme og anden opvarmning",
+  12: "Bioethanol",
+  90: "Blandet",
+};
+
+const BBR_TOILET = {
+  "I": "Intet toilet",
+  "T": "Toilet i bolig",
+  "U": "Toilet uden for bolig",
+};
+
+const BBR_BADE = {
+  "I": "Intet bad",
+  "V": "Badeværelse i bolig",
+  "U": "Baderum uden for bolig",
+};
+
+const BBR_KOKKEN = {
+  "I": "Ingen køkkenfaciliteter",
+  "K": "Køkken med afløb",
+  "A": "Køkkenniche med afløb",
+  "E": "Eget køkken",
+  "D": "Delt køkken",
+};
+
 const BBR_TEKNISK_KLASSIFIKATION = {
   "54.15.05.05": "Tank",
   "54.15.05.10": "Olieudskiller",
@@ -2685,23 +2753,51 @@ function summarizeGrund(g) {
 }
 
 function summarizeEnhed(e) {
-  const enhedId = pickFirst(e, [/enhed.*id/i, /id/i]);
-  const bfe = pickFirst(e, [/bfe.*nummer/i, /bfenr/i]);
-  const enhNr = pickFirst(e, [/enh.*nummer/i, /enhed.*nummer/i]);
-  const anv = pickFirst(e, [/anvendelse/i]);
-  const etage = pickFirst(e, [/etage/i]);
-  const doer = pickFirst(e, [/d[oø]r/i, /doer/i]);
-  const areal = pickFirst(e, [/areal/i, /bolig.*areal/i, /enhed.*areal/i]);
+  const obj = (e && e.enhed) ? e.enhed : e;
+
+  const anvKode  = obj["enh020EnhedensAnvendelse"] ?? null;
+  const anvTekst = anvKode != null ? (BBR_ENHED_ANVENDELSE[parseInt(anvKode)] ?? \`Kode \${anvKode}\`) : null;
+
+  const boligtypeKode  = obj["enh023Boligtype"] ?? null;
+  const boligtypeTekst = boligtypeKode != null ? (BBR_BOLIGTYPE[parseInt(boligtypeKode)] ?? \`Kode \${boligtypeKode}\`) : null;
+
+  const areal         = obj["enh026EnhedensSamledeAreal"] ?? obj["enh027ArealTilBeboelse"] ?? null;
+  const boligareal    = obj["enh027ArealTilBeboelse"] ?? null;
+  const altanAreal    = obj["enh070\u00c5benAltanTagterrasseAreal"] ?? obj["enh070AabenAltanTagterrasseAreal"] ?? null;
+  const antalVaerelser = obj["enh031AntalV\u00e6relser"] ?? obj["enh031AntalVaerelser"] ?? null;
+  const antalToiletter = obj["enh065AntalVandskylledeToiletter"] ?? null;
+  const antalBadevaer  = obj["enh066AntalBadevaerelser"] ?? obj["enh066AntalBadev\u00e6relser"] ?? null;
+
+  const energiKode  = obj["enh035Energiforsyning"] ?? null;
+  const energiTekst = energiKode != null ? (BBR_ENERGIFORSYNING[parseInt(energiKode)] ?? \`Kode \${energiKode}\`) : null;
+
+  const toiletKode  = obj["enh032Toiletforhold"] ?? null;
+  const toiletTekst = toiletKode != null ? (BBR_TOILET[toiletKode] ?? \`Kode \${toiletKode}\`) : null;
+
+  const badeKode  = obj["enh033Badeforhold"] ?? null;
+  const badeTekst = badeKode != null ? (BBR_BADE[badeKode] ?? \`Kode \${badeKode}\`) : null;
+
+  const kokkenKode  = obj["enh034K\u00f8kkenforhold"] ?? obj["enh034Kokkenforhold"] ?? null;
+  const kokkenTekst = kokkenKode != null ? (BBR_KOKKEN[kokkenKode] ?? \`Kode \${kokkenKode}\`) : null;
+
+  // Opgang-UUID — ikke direkte visningsværdi, men nyttigt
+  const opgang = obj["opgang"] ?? null;
 
   return [
-    { label: "Enhed-ID", value: enhedId },
-    { label: "BFE-nummer", value: bfe },
-    { label: "Enhed-nummer", value: enhNr },
-    { label: "Anvendelse", value: anv },
-    { label: "Etage", value: etage },
-    { label: "Dør", value: doer },
-    { label: "Areal", value: areal }
-  ];
+    { label: "Anvendelse",            value: anvTekst },
+    { label: "Boligtype",             value: boligtypeTekst },
+    { label: "Samlet areal",          value: areal != null ? \`\${areal} m²\` : null },
+    { label: "Boligareal",            value: boligareal != null ? \`\${boligareal} m²\` : null },
+    { label: "Altan/tagterasse",      value: altanAreal != null ? \`\${altanAreal} m²\` : null },
+    { label: "Antal værelser",        value: antalVaerelser },
+    { label: "Vandsk. toiletter",     value: antalToiletter },
+    { label: "Badeværelser",          value: antalBadevaer },
+    { label: "Energiforsyning",       value: energiTekst },
+    { label: "Toiletforhold",         value: toiletTekst },
+    { label: "Badeforhold",           value: badeTekst },
+    { label: "Køkkenforhold",         value: kokkenTekst },
+    { label: "Opgang-ID",             value: opgang },
+  ].filter(p => p.value != null && String(p.value).trim() !== "");
 }
 
 function summarizeEjendomsrelation(er) {
@@ -3754,14 +3850,35 @@ if (Array.isArray(grundOnly) && grundOnly.length > 0) {
 
 // ----- ENHED (pæn visning + rå data) -----
 if (Array.isArray(enhedOnly) && enhedOnly.length > 0) {
+  // Find den valgte enhed (matcher adresseId)
+  const valgtAdresseId = lastSelectedAdresseIdForBBR ? String(lastSelectedAdresseIdForBBR).trim() : null;
+  const valgtEnhed = valgtAdresseId
+    ? enhedOnly.find(e => {
+        const obj = (e && e.enhed) ? e.enhed : e;
+        return obj?.adresseIdentificerer === valgtAdresseId || obj?.adresse === valgtAdresseId;
+      })
+    : null;
+
+  // Vis den valgte enhed fremhævet øverst (hvis vi har en)
+  if (valgtEnhed) {
+    html += "<details open><summary><strong>&#127968; Valgt enhed</strong></summary>";
+    html += "<div style=\"margin-left:10px;border-left:3px solid #2ecc71;padding-left:8px;\">";
+    const pairs = summarizeEnhed(valgtEnhed);
+    html += renderKeyValueList(pairs);
+    html += "</div></details>";
+  }
+
+  // Vis alle enheder som fold-ud
   html += "<details><summary><strong>Enheder (" + String(enhedOnly.length) + ")</strong></summary>";
 
   enhedOnly.forEach((e, idx) => {
-    html += "<details style=\"margin-left:10px;\"><summary>Enhed " + String(idx + 1) + "</summary>";
-
+    const obj = (e && e.enhed) ? e.enhed : e;
+    const erValgt = valgtAdresseId &&
+      (obj?.adresseIdentificerer === valgtAdresseId || obj?.adresse === valgtAdresseId);
+    const label = erValgt ? "Enhed " + String(idx + 1) + " ✓ (valgt)" : "Enhed " + String(idx + 1);
+    html += "<details style=\"margin-left:10px;\"><summary>" + label + "</summary>";
     const pairs = summarizeEnhed(e);
     html += renderKeyValueList(pairs);
-
     html += "<details><summary>Vis rå Enhed-data</summary><pre>" + escapeHtml(JSON.stringify(e, null, 2)) + "</pre></details>";
     html += "</details>";
   });
